@@ -1,0 +1,14 @@
+[agents]
+enabled = true
+
+[mcp_servers.batch_tasks]
+command = "pnpm"
+args = ["--silent", "batch-tasks", "mcp"]
+required = true
+startup_timeout_sec = 30
+tool_timeout_sec = 120
+enabled_tools = ["get_assignment", "submit_result", "report_failure"]
+default_tools_approval_mode = "auto"
+
+[mcp_servers.batch_tasks.tools.report_failure]
+approval_mode = "approve"
