@@ -1,58 +1,80 @@
 # Agent Jobs
 
-一個可安裝、可重用、可續跑、以 JSON Schema 驗證的 TypeScript agent-job framework，
-支援 Codex 及 Claude。每筆 input 都由全新的 native subagent context 處理；parent 只取得
-canonical ID 與 opaque assignment handle，worker 再透過本地 stdio MCP 取得唯一一筆
-資料並 atomic commit 結果。
+Run the same structured task across many records with native Codex or Claude
+workers.
 
-命名沿用 OpenAI 舊 `spawn_agents_on_csv` 實作中的
-[`AgentJob`](https://github.com/openai/codex/blob/81e89fa5af13012c8313f032a17b11b9a5170d33/codex-rs/state/src/model/agent_job.rs)
-概念：一個 agent job 是一次完整 batch execution；`TASK_SPEC` 是可重用的每筆工作
-定義；assignment 則是 job 中交給單一 fresh worker 的一筆 opaque lease。
+Agent Jobs solves the coordination problems that appear when a normal agent prompt
+turns into a batch workload: shared context grows, results get mixed together,
+progress is easy to lose, and concurrent workers can overwrite one another. It
+turns the dataset into a schema-validated agent job, gives every input record an
+isolated worker assignment, and stores progress on disk so interrupted runs can
+resume safely.
 
-## 安裝
+Key benefits:
 
-使用者只需要 Node.js 20.6+。本階段先用本機 tarball 驗證，不 publish 到 npm：
+- A fresh agent context for every record
+- JSON Schema validation for both inputs and outputs
+- Bounded concurrency and automatic retries
+- Durable, resumable progress with atomic result writes
+- Small parent context: workers receive only their assigned record
+- Native project or global setup for Codex and Claude
 
-```bash
-# 在本 repository 產生 agent-jobs-0.3.0.tgz
-pnpm install --frozen-lockfile
-pnpm pack
+## Install
 
-# 在任意目錄初始化目前專案
-npm exec --yes --package=file:/absolute/path/agent-jobs-0.3.0.tgz -- agent-jobs init
-
-# 指定新路徑；目錄不存在時會在確認後建立
-npm exec --yes --package=file:/absolute/path/agent-jobs-0.3.0.tgz -- agent-jobs init ./my-project
-
-# CI／非互動環境
-npm exec --yes --package=file:/absolute/path/agent-jobs-0.3.0.tgz -- agent-jobs init ./my-project --yes
-```
-
-`init` 預設安裝 Codex 與 Claude 所需的 skill、兩個 custom agents 及 MCP 設定。
-省略 path 時使用目前目錄；`--target codex|claude` 可只安裝單一宿主，`--global`
-安裝到使用者層級且不可同時指定 path。所有實際寫入預設顯示絕對路徑並以
-`Proceed? [y/N]` 確認；`--dry-run` 不寫入也不詢問。
-
-完成後重新啟動 Codex／Claude，再執行：
+Agent Jobs requires Node.js 20.6 or later. The recommended command for a registry
+release is:
 
 ```bash
-node .agents/skills/agent-jobs/scripts/agent-jobs.mjs doctor  # Codex project install
-node .claude/skills/agent-jobs/scripts/agent-jobs.mjs doctor # Claude project install
+npx agent-jobs init
 ```
 
-MCP 是由宿主自動啟動的本地 stdio process。你不需要在 prompt 額外要求或預先手動
-執行；Agent Jobs skill 會安排 worker 呼叫 MCP。若 server 無法啟動，流程會明確失敗，
-不會退回直接寫入 result 檔案。
+The package is currently private and not yet available from the public npm
+registry. Until it is published, contributors can use the local setup described in
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
-開發與建置需要 Node.js 20.19+ 或 22.12+（Vite 8 的 build-time 要求）及 pnpm。
-Vite library mode 產生的單檔 ESM bundle 仍以 Node 20 為 target；使用者只需要
-Node.js 20.6+，不需要安裝 pnpm、tsx 或 runtime dependencies。
+By default, `init` configures the current project for both Codex and Claude. You can
+choose a path or a single host:
 
-## Quick start
+```bash
+# Configure another project
+npx agent-jobs init ./my-project
 
-先在已執行 `agent-jobs init` 的目標專案準備 input data 與 task spec。例如
-`batch-input.json`：
+# Configure only Codex
+npx agent-jobs init ./my-project --target codex
+
+# Configure Claude globally for the current user
+npx agent-jobs init --global --target claude
+```
+
+The installer shows every path it will change and asks for confirmation. Use
+`--dry-run` to preview the changes, or `--yes` in a non-interactive environment.
+Use `--force` only when you intentionally want to replace managed files that have
+been edited since installation.
+
+Restart Codex or Claude after installation so it discovers the new skill, agents,
+and MCP configuration.
+
+To check or remove the installation:
+
+```bash
+npx agent-jobs doctor
+npx agent-jobs uninstall
+```
+
+## Create a job
+
+A job needs three things:
+
+1. An input file containing the records
+2. A Markdown task spec defining the worker instruction and schemas
+3. A prompt containing the four required Agent Jobs markers
+
+### 1. Create the input file
+
+Agent Jobs accepts JSON, JSONL, CSV, and YAML. Each record must have a stable,
+unique string or integer ID.
+
+`proposals.json`:
 
 ```json
 [
@@ -61,11 +83,16 @@ Node.js 20.6+，不需要安裝 pnpm、tsx 或 runtime dependencies。
 ]
 ```
 
-以及 `batch-task.md`：
+### 2. Create the task spec
+
+The YAML frontmatter is the machine-readable contract. The Markdown body is the
+only instruction sent to each row worker.
+
+`review-proposal.md`:
 
 ```markdown
 ---
-name: proposal-review
+name: review-proposal
 version: 1
 input_schema:
   type: object
@@ -91,157 +118,110 @@ output_schema:
 Review the proposal title. Return a decision and a concise reason.
 ```
 
-重新啟動 Codex／Claude 後送出：
+The frontmatter supports these fields:
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `name` | Yes | Stable name for the task |
+| `version` | No | Task definition version; default: `1` |
+| `input_schema` | Yes | JSON Schema for each input record |
+| `output_schema` | Yes | JSON Schema for each worker result |
+| `description` | No | Human-readable task description |
+| `model` | No | Default worker model |
+| `reasoning_effort` | No | Default worker reasoning effort |
+
+Workers receive only fields declared in `input_schema.properties`. Invalid inputs
+are rejected before any worker starts.
+
+### 3. Send the prompt
+
+After restarting Codex or Claude, send a prompt like this:
 
 ```text
-請處理所有 proposal，完成後整理 accept/reject 數量並說明主要理由。
+Review every proposal. When all records are complete, summarize the accept and
+reject counts and the main reasons.
 
-INPUT_DATA: batch-input.json
-TASK_SPEC: batch-task.md
+INPUT_DATA: proposals.json
+TASK_SPEC: review-proposal.md
 ID_COLUMN_KEY: id
-OUTPUT_DIR: batch-output/
+OUTPUT_DIR: proposal-results/
 MAX_CONCURRENCY: 4
 COLLECT_FORMAT: json
 ```
 
-`AGENTS.md` 會把含四個 required markers 的 prompt 路由到 Agent Jobs skill。markers 以外
-的 prose 只供 parent 及可選的 postprocessor 使用，不會傳給 row worker。
+The first four markers activate Agent Jobs. Text outside the markers tells the
+parent agent how to present or post-process the completed batch; it is not added to
+each worker's task.
 
-## Prompt markers
+## Prompt configuration
 
-| Marker | Required | Meaning |
+| Marker | Required | Purpose |
 | --- | --- | --- |
-| `INPUT_DATA` | yes | JSON、JSONL、CSV 或 YAML input path |
-| `TASK_SPEC` | yes | 含 YAML frontmatter 的 Markdown 檔案路徑 |
-| `ID_COLUMN_KEY` | yes | 每筆資料的穩定唯一 ID 欄位 |
-| `OUTPUT_DIR` | yes | 本次 batch 的持久化輸出目錄 |
-| `RECORDS_PATH` | no | JSON Pointer；JSON/YAML 非 top-level list 時使用 |
-| `MODEL` | no | 整批 row workers 的 model |
-| `REASONING_EFFORT` | no | 整批 row workers 的 reasoning effort |
-| `MAX_CONCURRENCY` | no | 正整數上限；實際數量仍受目前 agent slots 限制 |
-| `MAX_RETRIES` | no | 每筆失敗後重試次數；預設 `1` |
-| `RETRY_INVALID` | no | `true` 時 archive 既有 invalid result 再重跑 |
-| `ON_ERROR` | no | `stop`（預設）或 `continue_successes` |
-| `COLLECT_FORMAT` | no | `none`、`json`、`jsonl` 或 `csv`；預設 `json` |
-| `POST_PROCESS_MODEL` | no | AI postprocessor model |
-| `POST_PROCESS_REASONING_EFFORT` | no | AI postprocessor reasoning effort |
+| `INPUT_DATA` | Yes | Path to a JSON, JSONL, CSV, or YAML input file |
+| `TASK_SPEC` | Yes | Path to the Markdown task spec |
+| `ID_COLUMN_KEY` | Yes | Field containing each record's unique ID |
+| `OUTPUT_DIR` | Yes | Persistent output directory for this batch |
+| `RECORDS_PATH` | No | JSON Pointer when records are not the top-level JSON/YAML list |
+| `MODEL` | No | Model used by row workers |
+| `REASONING_EFFORT` | No | Reasoning effort used by row workers |
+| `MAX_CONCURRENCY` | No | Maximum workers to run at once |
+| `MAX_RETRIES` | No | Retries after the first failed attempt; default: `1` |
+| `RETRY_INVALID` | No | Set to `true` to archive and rerun an existing invalid result |
+| `ON_ERROR` | No | `stop` (default) or `continue_successes` |
+| `COLLECT_FORMAT` | No | `none`, `json`, `jsonl`, or `csv`; default: `json` |
+| `POST_PROCESS_MODEL` | No | Model used for the optional final synthesis |
+| `POST_PROCESS_REASONING_EFFORT` | No | Reasoning effort for final synthesis |
 
-Model/effort precedence 是 prompt marker > spec frontmatter > parent inheritance。若某層
-只選 model 而沒有 effort，該 model 使用自身預設 effort。postprocessor 可獨立 override。
-
-## Task spec
-
-Runnable spec 以 YAML frontmatter 保存 machine-readable contract：
-`name`、`version`、可選的 `description`、`model`、`reasoning_effort`，以及必填的
-`input_schema`、`output_schema`。Markdown body 是唯一的 row task instruction。
-
-Worker 只會收到 `input_schema.properties` 宣告的欄位。`required`、空字串、null、
-enum 與 additional properties 的語意都由 JSON Schema 決定。v1 支援同一 schema
-內可解析的 local references；外部或無法解析的 references 會在任何 worker spawn 前
-被拒絕。
-
-## Resume 與 artifacts
+Worker model settings use this precedence:
 
 ```text
-OUTPUT_DIR/
-  runs/<safe-id>.json
-  errors/<safe-id>.json
-  history/invalid/...
-  report.json
-  .batch/jobs/...
+prompt marker > task spec > parent agent setting
 ```
 
-`runs/<safe-id>.json` 是純 task output。只要該 path 已存在，resume 就會無條件 skip；
-input、spec、prompt、model 或 effort 改變都不會使它自動失效。既有檔案若不符合目前
-schema，預設保留並在 final validation 報錯；只有 `RETRY_INVALID: true` 會先 archive
-再排入 queue。
+## Files and output
 
-ID 只接受非空 string 或 integer，並 canonicalize 為 string；float、boolean、null、
-空字串與 duplicate ID 都會令整批 preflight 失敗。JSON 的超大 integer 會 losslessly
-保留，不會經 JavaScript `number` 造成 ID 精度或檔名碰撞。不安全的 ID 會轉為
-deterministic safe filename。
+A project installation adds only host integration files:
 
-`submit_result` 會先驗證 output schema，再以 same-directory temporary file、fsync 與
-atomic no-clobber publication 寫入。Worker 預設使用 `result_json` 傳遞精確 JSON 文字，
-因此 64-bit 或更大的 integer 不會在 MCP JSON-RPC boundary 被轉成不精確的
-JavaScript `number`；`result` object 參數仍保留給不含這類數字的相容性用法。請勿手動寫入
-`runs/`，也不要讓兩個 parent 同時操作相同的 `OUTPUT_DIR`。
-狀態修改使用 same-host cross-process lock；它不會因 event loop 阻塞而偷走仍在使用的
-lock，owner crash 時可回收。若無法在 30 秒內取得，會回報含 owner diagnostics 的
-`lock_timeout`，而不會以不安全的 age-based steal 強行繼續。
-若回收 lock 的 process 本身在極窄的 recovery window 內 crash，它留下的
-recovery claim 也不會被其他 waiter 強行偷走；重新送出原 prompt 執行 `prepare`
-會產生新 agent job，並依既有 `runs/` 繼續，不需要破壞性地刪除 lock。
+```text
+.agent-jobs/install-manifest.json
 
-Handle registry 預設位於目標專案 root 的 `.agent-jobs/handles/`；
-可在啟動 Codex 前用 `AGENT_JOBS_REGISTRY_DIR` override，確保 parent CLI 與 MCP process
-繼承同一個值。registry 是本機 ephemeral capability index，不是可攜式 cache。
+# Codex
+AGENTS.md
+.agents/skills/agent-jobs/
+.codex/agents/agent_job_worker.toml
+.codex/agents/agent_job_postprocessor.toml
+.codex/config.toml
 
-## CLI
-
-通常由 skill 自動使用；以下 commands 可供診斷或整合測試：
-Repository 內修改 source 或 templates 後先執行 `pnpm build`；`pnpm agent-jobs`
-會直接執行最新的 `dist/agent-jobs.mjs`，避免 build log 污染 JSON 或 MCP stdio。
-
-```bash
-agent-jobs init [path] [--target all|codex|claude] [--global] [--yes] [--dry-run] [--force] [--json]
-agent-jobs uninstall [path] [--target all|codex|claude] [--global] [--yes] [--dry-run] [--json]
-
-pnpm --silent agent-jobs prepare \
-  --input-data /path/to/input.json \
-  --task-spec /path/to/task.md \
-  --id-column-key id \
-  --output-dir /path/to/output
-
-pnpm --silent agent-jobs next --output-dir /path/to/output --job-id <id> --count 4
-pnpm --silent agent-jobs status --output-dir /path/to/output --job-id <id>
-pnpm --silent agent-jobs validate --output-dir /path/to/output --job-id <id>
-pnpm --silent agent-jobs collect --output-dir /path/to/output --job-id <id> --format json
-pnpm --silent agent-jobs doctor --output-dir /path/to/output --task-spec /path/to/task.md
-pnpm --silent agent-jobs mcp
+# Claude
+CLAUDE.md
+.claude/skills/agent-jobs/
+.claude/agents/agent_job_worker.md
+.claude/agents/agent_job_postprocessor.md
+.claude/settings.local.json
+.mcp.json
 ```
 
-除 `mcp` 的 JSON-RPC stdio protocol 外，每個 command 都只輸出一個 JSON object。
-不要直接在互動 terminal 啟動 `mcp` 後等待一般文字；它預期由 MCP client 透過 stdin/stdout
-通訊。
+The installer tracks its managed changes in `.agent-jobs/install-manifest.json` so
+they can be checked and removed safely. During execution, `.agent-jobs/handles/`
+stores temporary local assignment capabilities; it is not part of the job output.
 
-## 開發與驗證
+Each run stores durable state under the selected `OUTPUT_DIR`:
 
-這是兩個 package 的 pnpm workspace：root `agent-jobs` 負責 installer、host
-templates 與公開 CLI，`packages/runtime` 負責 batch state machine、資料驗證及 MCP。
-依賴只允許 installer 指向 runtime；runtime 不知道 Codex、Claude 或安裝路徑。
-
-兩個 package 都使用 TypeScript ESM；MCP server 使用
-`@modelcontextprotocol/server`，JSON Schema 使用 Ajv。Vite 8 library mode 透過
-Rolldown 產生單一 Node ESM bundle，installer 的 Markdown templates 以 `?raw`
-直接嵌入；unit/integration tests 使用 Vitest。
-
-```bash
-pnpm typecheck
-pnpm test
-pnpm build
-
-# 本機模擬使用者專案；playground/ 不會納入版本控制
-pnpm agent-jobs init playground
+```text
+proposal-results/
+  runs/<safe-record-id>.json  # Valid task outputs
+  errors/<safe-record-id>.json # Structured worker failures
+  history/invalid/            # Invalid results archived for retry
+  report.json                 # Final validation report
+  collected.json              # Optional combined output
+  .batch/jobs/<job-id>.json   # Queue and resume state
 ```
 
-主要 CLI commands 是 `prepare`、`next`、`status`、`validate`、`collect`、`doctor`、
-`mcp`，以及安裝用的 `init`、`uninstall`。MCP 只公開 `get_assignment`、
-`submit_result`、`report_failure` 三個 tools。
-`submit_result` 接受二選一的 `result_json` 精確 JSON 文字（worker 預設）或
-`result` JSON object（backward compatibility）。
+Completed records are reused when the same output directory is resumed. Do not
+edit `runs/` directly or run two parent agents against the same `OUTPUT_DIR` at the
+same time.
 
-## Error 與 isolation model
+## Contributing
 
-每次 retry 都使用新的 worker context。`MAX_RETRIES: 1` 代表 initial attempt 加一次 retry。
-耗盡後產生 structured row error。`ON_ERROR: stop` 阻止 collect 與 AI post-processing；
-`continue_successes` 只處理目前成功而且有效的 rows。
-
-Row worker 使用 fresh context 與 read-only sandbox；project role 也停用 shell、web、apps、
-memory、multi-agent、remote-plugin discovery、skill dependency installation與 image reading，
-並在 instruction 層只允許 `agent_jobs` MCP。這可避免 workers 共用 conversation 或 results。
-
-這仍是 best-effort application boundary，不是 OS security boundary：native subagents 共用
-Codex host 與底層 filesystem，project/custom-agent config 也無法以全域 deny 移除所有使用者
-層已登記的任意 MCP server。v1 不提供 row-level web/repo research，也不承諾最低
-concurrency、特定 throughput 或大量資料的完成 SLA。
+Development setup, architecture, build commands, and test guidance live in
+[CONTRIBUTING.md](CONTRIBUTING.md).
