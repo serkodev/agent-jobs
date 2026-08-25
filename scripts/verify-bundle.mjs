@@ -147,7 +147,8 @@ Return one summary string.
         name: 'submit_result',
         arguments: {
           handle: lease.handle,
-          result_json: JSON.stringify({ summary: `processed-${row.id}` }),
+          result_format: 'json_text',
+          result: JSON.stringify({ summary: `processed-${row.id}` }),
         },
       });
       assert.notEqual(submitted.isError, true);

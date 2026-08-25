@@ -45,20 +45,21 @@ describe('agent_jobs MCP surface', () => {
       ]);
       const tools = await client.listTools();
       expect(tools.tools.map(tool => tool.name)).toEqual(AGENT_JOBS_TOOL_NAMES);
-      expect(
-        tools.tools.find(tool => tool.name === 'submit_result')?.inputSchema,
-      ).toMatchObject({
+      const submitInputSchema = tools.tools.find(
+        tool => tool.name === 'submit_result',
+      )?.inputSchema;
+      expect(submitInputSchema).toMatchObject({
         type: 'object',
-        required: ['handle'],
+        required: ['handle', 'result_format', 'result'],
         properties: {
-          result: { type: 'object' },
-          result_json: { type: 'string' },
+          result_format: {
+            type: 'string',
+            enum: ['json_object', 'json_text'],
+          },
+          result: {},
         },
-        oneOf: [
-          { required: ['result'] },
-          { required: ['result_json'] },
-        ],
       });
+      expect(submitInputSchema).not.toHaveProperty('oneOf');
 
       const result = await client.callTool({
         name: 'get_assignment',
@@ -155,7 +156,11 @@ describe('agent_jobs MCP surface', () => {
       ]);
       await client.callTool({
         name: 'submit_result',
-        arguments: { handle: 'aj_handle', result },
+        arguments: {
+          handle: 'aj_handle',
+          result_format: 'json_object',
+          result,
+        },
       });
       const submitted = submit.mock.calls[0]?.[1] as Record<string, unknown>;
       expect(Object.hasOwn(submitted, '__proto__')).toBe(true);
@@ -167,7 +172,7 @@ describe('agent_jobs MCP surface', () => {
     }
   });
 
-  it('parses result_json without losing unsafe integer literals or magic own keys', async () => {
+  it('parses json_text without losing unsafe integer literals or magic own keys', async () => {
     const submit = vi.fn().mockResolvedValue({ id: 'one', committed: true });
     const runtime = runtimeWith({ submitResult: submit });
     const server = createAgentJobsServer(runtime);
@@ -183,7 +188,8 @@ describe('agent_jobs MCP surface', () => {
         name: 'submit_result',
         arguments: {
           handle: 'aj_handle',
-          result_json:
+          result_format: 'json_text',
+          result:
             '{"exact":9223372036854775807,"__proto__":{"kept":true}}',
         },
       });
@@ -201,28 +207,62 @@ describe('agent_jobs MCP surface', () => {
 
   it.each([
     {
-      name: 'both result forms',
+      name: 'a missing result format',
       arguments: {
         handle: 'aj_handle',
         result: { summary: 'object' },
-        result_json: '{"summary":"text"}',
       },
-      expected: /exactly one|invalid params/i,
+      expected: /result_format|invalid params/i,
     },
     {
-      name: 'neither result form',
-      arguments: { handle: 'aj_handle' },
-      expected: /exactly one|invalid params/i,
+      name: 'a missing result',
+      arguments: { handle: 'aj_handle', result_format: 'json_object' },
+      expected: /result is required|invalid params/i,
+    },
+    {
+      name: 'an unsupported result format',
+      arguments: {
+        handle: 'aj_handle',
+        result_format: 'yaml',
+        result: 'summary: text',
+      },
+      expected: /result_format|invalid params/i,
+    },
+    {
+      name: 'a string passed as json_object',
+      arguments: {
+        handle: 'aj_handle',
+        result_format: 'json_object',
+        result: '{"summary":"text"}',
+      },
+      expected: /result must be an object|invalid params/i,
+    },
+    {
+      name: 'an object passed as json_text',
+      arguments: {
+        handle: 'aj_handle',
+        result_format: 'json_text',
+        result: { summary: 'object' },
+      },
+      expected: /result must be a string|invalid params/i,
     },
     {
       name: 'invalid JSON text',
-      arguments: { handle: 'aj_handle', result_json: '{' },
-      expected: /invalid_result_json|valid strict JSON/i,
+      arguments: {
+        handle: 'aj_handle',
+        result_format: 'json_text',
+        result: '{',
+      },
+      expected: /invalid_json_text_result|valid strict JSON/i,
     },
     {
       name: 'non-object JSON text',
-      arguments: { handle: 'aj_handle', result_json: '[1,2,3]' },
-      expected: /invalid_result_json|JSON object/i,
+      arguments: {
+        handle: 'aj_handle',
+        result_format: 'json_text',
+        result: '[1,2,3]',
+      },
+      expected: /invalid_json_text_result|JSON object/i,
     },
   ])('rejects $name', async ({ arguments: toolArguments, expected }) => {
     const submit = vi.fn().mockResolvedValue({ id: 'one', committed: true });

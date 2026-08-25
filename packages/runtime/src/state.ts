@@ -57,6 +57,7 @@ const COLLECT_FORMATS = new Set<CollectFormat>([
 export type PathInput = string | URL;
 export type CollectFormat = 'none' | 'json' | 'jsonl' | 'csv';
 export type OnError = 'stop' | 'continue_successes';
+type SessionStatus = 'active' | 'superseded';
 export type RecordStatus
   = | 'pending'
     | 'leased'
@@ -141,6 +142,9 @@ interface SerializedSpec extends JsonObject {
 interface AgentJobState extends JsonObject {
   state_version: number;
   job_id: string;
+  session_status?: SessionStatus;
+  superseded_at?: string;
+  superseded_by_job_id?: string;
   created_at: string;
   updated_at: string;
   input_data: string;
@@ -160,6 +164,11 @@ interface RegistryEntry extends JsonObject {
   job_id: string;
   record_index: number;
   handle: string;
+}
+
+interface SupersededSession {
+  jobId: string;
+  reclaimedAssignments: number;
 }
 
 export interface QueueCounts extends JsonObject {
@@ -243,7 +252,6 @@ export class AgentJobsRuntime {
       = reasoningEffort ?? (model !== null ? null : (spec.reasoningEffort ?? null));
     const jobId = randomUUID().replaceAll('-', '');
     const destination = await canonicalPath(options.outputDir);
-    const runsDir = join(destination, 'runs');
     const jobsDir = join(destination, '.batch', 'jobs');
 
     await ensureOutputLayout(destination, true);
@@ -253,32 +261,6 @@ export class AgentJobsRuntime {
       'invalid',
       `${archiveStamp()}-${jobId}`,
     );
-    const cacheDiagnostics: JsonObject[] = [];
-
-    for (const row of preparedRows) {
-      await ensureOutputLayout(destination, false);
-      const runPath = join(runsDir, `${row.safe_id}.json`);
-      if (!(await managedFileExists(runPath))) {
-        row.status = 'pending';
-        continue;
-      }
-      const errors = await this.validateRunFile(runPath, spec.outputSchema);
-      if (errors.length > 0 && retryInvalid) {
-        const archivePath = join(archiveRoot, basename(runPath));
-        await ensureArchiveDirectory(archiveRoot);
-        await atomicMove(runPath, archivePath);
-        row.status = 'pending';
-        row.archived_invalid_path = archivePath;
-        continue;
-      }
-      row.status = errors.length > 0 ? 'skipped_invalid' : 'skipped_valid';
-      row.cache_validation_errors = errors;
-      if (errors.length > 0) {
-        cacheDiagnostics.push({ id: row.id, path: runPath, errors });
-      }
-    }
-
-    const timestamp = now();
     const settings: ResolvedSettings = {
       model: resolvedModel,
       reasoning_effort: resolvedEffort,
@@ -290,35 +272,52 @@ export class AgentJobsRuntime {
       post_process_model: postProcessModel,
       post_process_reasoning_effort: postProcessReasoningEffort,
     };
-    const state: AgentJobState = {
-      state_version: STATE_VERSION,
-      job_id: jobId,
-      created_at: timestamp,
-      updated_at: timestamp,
-      input_data: absolutePath(options.inputData),
-      task_spec: absolutePath(spec.path),
-      output_dir: destination,
-      id_column_key: options.idColumnKey,
-      records_path: recordsPath,
-      spec: serializeSpec(spec),
-      settings,
-      records: preparedRows,
-      cache_diagnostics: cacheDiagnostics,
-    };
     const statePath = join(jobsDir, `${jobId}.json`);
-    await ensureOutputLayout(destination, false);
-    await atomicWriteJson(statePath, state, { noClobber: true });
-    await ensureOutputLayout(destination, false);
-    await atomicWriteJson(join(destination, '.batch', 'current.json'), {
-      job_id: jobId,
-      state_path: statePath,
+    const session = await withLock(sessionLockPath(destination), async () => {
+      const superseded = await this.supersedeCurrentSession(destination, jobId);
+      // Fence the previous session before taking this cache snapshot so an old
+      // worker cannot publish a result after rows have been classified.
+      const cacheDiagnostics = await this.classifyCachedRuns(
+        preparedRows,
+        spec.outputSchema,
+        destination,
+        archiveRoot,
+        retryInvalid,
+      );
+
+      const timestamp = now();
+      const state: AgentJobState = {
+        state_version: STATE_VERSION,
+        job_id: jobId,
+        session_status: 'active',
+        created_at: timestamp,
+        updated_at: timestamp,
+        input_data: absolutePath(options.inputData),
+        task_spec: absolutePath(spec.path),
+        output_dir: destination,
+        id_column_key: options.idColumnKey,
+        records_path: recordsPath,
+        spec: serializeSpec(spec),
+        settings,
+        records: preparedRows,
+        cache_diagnostics: cacheDiagnostics,
+      };
+      await ensureOutputLayout(destination, false);
+      await atomicWriteJson(statePath, state, { noClobber: true });
+      await ensureOutputLayout(destination, false);
+      await atomicWriteJson(join(destination, '.batch', 'current.json'), {
+        job_id: jobId,
+        state_path: statePath,
+      });
+      return { state, superseded };
     });
 
     return {
       ok: true,
       job_id: jobId,
+      session_status: 'active',
       output_dir: destination,
-      counts: counts(state),
+      counts: counts(session.state),
       worker: {
         model: resolvedModel,
         reasoning_effort: resolvedEffort,
@@ -328,7 +327,14 @@ export class AgentJobsRuntime {
         reasoning_effort: postProcessReasoningEffort,
       },
       settings,
-      cache_diagnostics: cacheDiagnostics,
+      cache_diagnostics: session.state.cache_diagnostics,
+      ...(session.superseded === null
+        ? {}
+        : {
+            superseded_job_id: session.superseded.jobId,
+            reclaimed_assignments:
+              session.superseded.reclaimedAssignments,
+          }),
     };
   }
 
@@ -350,6 +356,7 @@ export class AgentJobsRuntime {
     return await withLock(lockPath(statePath), async () => {
       const state = await this.readState(statePath);
       await ensureStateOutputLayout(state);
+      assertActiveSession(state);
       await this.reconcileCommittedRuns(state);
       const active = state.records.filter(record =>
         ACTIVE_STATUSES.has(record.status),
@@ -403,6 +410,7 @@ export class AgentJobsRuntime {
     return await withLock(lockPath(statePath), async () => {
       const state = await this.readState(statePath);
       await ensureStateOutputLayout(state);
+      assertActiveSession(state);
       const record = recordForRegistry(state, registry, handle);
       if (record.status === 'running') {
         throw new AgentJobsError(
@@ -465,6 +473,7 @@ export class AgentJobsRuntime {
     const outcome = await withLock(lockPath(statePath), async () => {
       const state = await this.readState(statePath);
       await ensureStateOutputLayout(state);
+      assertActiveSession(state);
       const record = recordForRegistry(state, registry, handle);
       if (record.status !== 'running') {
         const code = TERMINAL_STATUSES.has(record.status)
@@ -539,6 +548,7 @@ export class AgentJobsRuntime {
     const outcome = await withLock(lockPath(statePath), async () => {
       const state = await this.readState(statePath);
       await ensureStateOutputLayout(state);
+      assertActiveSession(state);
       const record = recordForRegistry(state, registry, handle);
       if (!ACTIVE_STATUSES.has(record.status)) {
         throw new AgentJobsError(
@@ -607,12 +617,19 @@ export class AgentJobsRuntime {
     return await withLock(lockPath(statePath), async () => {
       const state = await this.readState(statePath);
       await ensureStateOutputLayout(state);
-      if (await this.reconcileCommittedRuns(state)) {
+      if (
+        sessionStatus(state) === 'active'
+        && await this.reconcileCommittedRuns(state)
+      ) {
         await this.saveState(statePath, state);
       }
       return {
         ok: true,
         job_id: state.job_id,
+        session_status: sessionStatus(state),
+        ...(state.superseded_by_job_id === undefined
+          ? {}
+          : { superseded_by_job_id: state.superseded_by_job_id }),
         output_dir: state.output_dir,
         counts: counts(state),
         rows: state.records.map(record => ({
@@ -636,6 +653,7 @@ export class AgentJobsRuntime {
     return await withLock(lockPath(statePath), async () => {
       const state = await this.readState(statePath);
       await ensureStateOutputLayout(state);
+      assertActiveSession(state);
       if (await this.reconcileCommittedRuns(state)) {
         await this.saveState(statePath, state);
       }
@@ -656,6 +674,7 @@ export class AgentJobsRuntime {
     return await withLock(lockPath(statePath), async () => {
       const state = await this.readState(statePath);
       await ensureStateOutputLayout(state);
+      assertActiveSession(state);
       const selectedFormat
         = options.format ?? state.settings.collect_format;
       if (!COLLECT_FORMATS.has(selectedFormat)) {
@@ -950,6 +969,83 @@ export class AgentJobsRuntime {
     };
   }
 
+  /** Fence the previous output-directory session before a replacement starts. */
+  private async supersedeCurrentSession(
+    destination: string,
+    replacementJobId: string,
+  ): Promise<SupersededSession | null> {
+    const pointerPath = join(destination, '.batch', 'current.json');
+    if (!(await managedFileExists(pointerPath)))
+      return null;
+
+    const previousStatePath = await this.statePath(destination, null);
+    return await withLock(lockPath(previousStatePath), async () => {
+      const state = await this.readState(previousStatePath);
+      await ensureStateOutputLayout(state);
+      if (sessionStatus(state) === 'superseded') {
+        return { jobId: state.job_id, reclaimedAssignments: 0 };
+      }
+
+      await this.reconcileCommittedRuns(state);
+      const staleHandles: string[] = [];
+      for (const record of state.records) {
+        if (!ACTIVE_STATUSES.has(record.status))
+          continue;
+        if (record.handle !== null)
+          staleHandles.push(record.handle);
+        record.status = 'pending';
+        record.handle = null;
+        delete record.leased_at;
+        delete record.started_at;
+      }
+
+      state.session_status = 'superseded';
+      state.superseded_at = now();
+      state.superseded_by_job_id = replacementJobId;
+      await this.saveState(previousStatePath, state);
+      for (const handle of staleHandles)
+        await safeUnlink(this.registryPath(handle));
+
+      return {
+        jobId: state.job_id,
+        reclaimedAssignments: staleHandles.length,
+      };
+    });
+  }
+
+  private async classifyCachedRuns(
+    records: AgentJobItemRecord[],
+    outputSchema: JsonSchema,
+    destination: string,
+    archiveRoot: string,
+    retryInvalid: boolean,
+  ): Promise<JsonObject[]> {
+    const diagnostics: JsonObject[] = [];
+    const runsDir = join(destination, 'runs');
+    for (const record of records) {
+      await ensureOutputLayout(destination, false);
+      const runPath = join(runsDir, `${record.safe_id}.json`);
+      if (!(await managedFileExists(runPath))) {
+        record.status = 'pending';
+        continue;
+      }
+      const errors = await this.validateRunFile(runPath, outputSchema);
+      if (errors.length > 0 && retryInvalid) {
+        const archivePath = join(archiveRoot, basename(runPath));
+        await ensureArchiveDirectory(archiveRoot);
+        await atomicMove(runPath, archivePath);
+        record.status = 'pending';
+        record.archived_invalid_path = archivePath;
+        continue;
+      }
+      record.status = errors.length > 0 ? 'skipped_invalid' : 'skipped_valid';
+      record.cache_validation_errors = errors;
+      if (errors.length > 0)
+        diagnostics.push({ id: record.id, path: runPath, errors });
+    }
+    return diagnostics;
+  }
+
   private preflightRows(
     rows: JsonObject[],
     spec: TaskSpec,
@@ -1195,6 +1291,16 @@ export class AgentJobsRuntime {
       throw new AgentJobsError(
         'invalid_job',
         'Agent job items are invalid',
+      );
+    }
+    if (
+      value.session_status !== undefined
+      && value.session_status !== 'active'
+      && value.session_status !== 'superseded'
+    ) {
+      throw new AgentJobsError(
+        'invalid_job',
+        'Agent job session status is invalid',
       );
     }
     return value as unknown as AgentJobState;
@@ -1482,6 +1588,23 @@ function recordForRegistry(
   return record;
 }
 
+function sessionStatus(state: AgentJobState): SessionStatus {
+  return state.session_status ?? 'active';
+}
+
+function assertActiveSession(state: AgentJobState): void {
+  if (sessionStatus(state) === 'active')
+    return;
+  throw new AgentJobsError(
+    'session_superseded',
+    'This agent job session was superseded by a newer run',
+    {
+      job_id: state.job_id,
+      superseded_by_job_id: state.superseded_by_job_id ?? null,
+    },
+  );
+}
+
 function counts(state: AgentJobState): QueueCounts {
   const statuses = new Map<RecordStatus, number>();
   for (const record of state.records) {
@@ -1521,6 +1644,10 @@ function errorPathFor(
 
 function lockPath(statePath: string): string {
   return `${statePath}.lock`;
+}
+
+function sessionLockPath(destination: string): string {
+  return join(destination, '.batch', 'session.lock');
 }
 
 async function writeCollection(

@@ -46,10 +46,9 @@ npx agent-jobs init ./my-project --target codex
 npx agent-jobs init --global --target claude
 ```
 
-The installer shows every path it will change and asks for confirmation. Use
-`--dry-run` to preview the changes, or `--yes` in a non-interactive environment.
-Use `--force` only when you intentionally want to replace managed files that have
-been edited since installation.
+The installer shows the target path and asks for confirmation. Use `--yes` in a
+non-interactive environment. Use `--force` only when you intentionally want to
+replace managed files that have been edited since installation.
 
 Restart Codex or Claude after installation so it discovers the new skill, agents,
 and MCP configuration.
@@ -219,7 +218,11 @@ proposal-results/
 
 Completed records are reused when the same output directory is resumed. Do not
 edit `runs/` directly or run two parent agents against the same `OUTPUT_DIR` at the
-same time.
+same time. Each `prepare` creates a new job ID that also acts as the execution
+session token. When an interrupted output directory is prepared again, the prior
+session is superseded, its active handles are revoked, and uncommitted records are
+issued again under the new job ID. A result committed before interruption remains
+the authoritative checkpoint and is not repeated.
 
 ## Contributing
 

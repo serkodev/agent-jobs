@@ -57,7 +57,6 @@ interface InstallArguments {
   target: InstallTarget;
   global: boolean;
   yes: boolean;
-  dryRun: boolean;
   force: boolean;
   json: boolean;
 }
@@ -116,7 +115,7 @@ export interface InstallerEnvironment {
 
 export interface InstallerCommandResult extends Record<string, unknown> {
   ok: true;
-  status: 'initialized' | 'uninstalled' | 'cancelled' | 'dry_run' | 'not_installed';
+  status: 'initialized' | 'uninstalled' | 'cancelled' | 'not_installed';
   path: string;
   scope: Scope;
   targets: string[];
@@ -137,12 +136,11 @@ function parseInstallArguments(args: readonly string[]): InstallArguments {
       allowPositionals: true,
       strict: true,
       options: {
-        'target': { type: 'string' },
-        'global': { type: 'boolean' },
-        'yes': { type: 'boolean' },
-        'dry-run': { type: 'boolean' },
-        'force': { type: 'boolean' },
-        'json': { type: 'boolean' },
+        target: { type: 'string' },
+        global: { type: 'boolean' },
+        yes: { type: 'boolean' },
+        force: { type: 'boolean' },
+        json: { type: 'boolean' },
       },
     });
   } catch (error) {
@@ -164,7 +162,6 @@ function parseInstallArguments(args: readonly string[]): InstallArguments {
     target: rawTarget as InstallTarget,
     global,
     yes: parsed.values.yes === true,
-    dryRun: parsed.values['dry-run'] === true,
     force: parsed.values.force === true,
     json: parsed.values.json === true,
   };
@@ -956,9 +953,6 @@ function humanResult(result: InstallerCommandResult): string {
     return `Cancelled; no files were changed in ${result.path}.\n`;
   if (result.status === 'not_installed')
     return `agent-jobs is not installed in ${result.path}.\n`;
-  if (result.status === 'dry_run') {
-    return `Dry run for ${result.path}: ${result.changed_files.length} file(s) would change.\n`;
-  }
   const verb = result.status === 'initialized' ? 'Initialized' : 'Uninstalled';
   return `${verb} agent-jobs in ${result.path}; ${result.changed_files.length} file(s) changed.\n`;
 }
@@ -984,20 +978,6 @@ export async function runInstallerCommand(
       ...base,
       status: 'not_installed',
       changed_files: [],
-      warnings: [],
-    };
-    stdout.write(args.json ? `${JSON.stringify(result)}\n` : humanResult(result));
-    return 0;
-  }
-  const previewFiles
-    = operation === 'init'
-      ? plan.files.map(file => file.path)
-      : plan.manifest!.files.map(file => file.path);
-  if (args.dryRun) {
-    const result: InstallerCommandResult = {
-      ...base,
-      status: 'dry_run',
-      changed_files: previewFiles,
       warnings: [],
     };
     stdout.write(args.json ? `${JSON.stringify(result)}\n` : humanResult(result));

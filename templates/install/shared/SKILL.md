@@ -43,9 +43,12 @@ Run, adding only flags represented by optional markers:
 ```
 
 Pass every value as a separately quoted argument. If prepare returns `ok: false`,
-report its diagnostics and stop. Otherwise retain the job ID, resolved worker
-and postprocessor settings, concurrency cap, error policy, and collection format.
-Never independently read or revalidate the full input or task specification.
+report its diagnostics and stop. Otherwise retain the job ID as the execution
+session token, along with the resolved worker and postprocessor settings,
+concurrency cap, error policy, and collection format. A new prepare for the same
+output directory supersedes the previous session and reclaims its uncommitted
+assignments. Never independently read or revalidate the full input or task
+specification.
 
 ## Run isolated workers
 
@@ -62,7 +65,8 @@ The worker message contains only:
 ```text
 Process exactly one opaque batch assignment.
 ASSIGNMENT_HANDLE: <handle>
-Use only agent_jobs: get_assignment(handle), then submit_result(handle, result_json)
+Use only agent_jobs: get_assignment(handle), then submit_result(handle,
+result_format="json_text", result=<exact JSON object text>)
 or report_failure(handle, code, message). Return only an acknowledgement.
 ```
 
@@ -101,4 +105,5 @@ main response.
 - Worker final messages are acknowledgements, never row results.
 - Never bypass unavailable MCP tools with direct filesystem writes.
 - Existing run paths are intentionally existence-only resume checkpoints.
+- Run prepare exactly once per parent execution; its job ID fences older workers.
 - Do not run two parent orchestrators against the same output directory.

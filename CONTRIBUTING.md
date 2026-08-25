@@ -89,6 +89,9 @@ tools:
 `prepare` validates the input, task spec, IDs, and schemas before workers start.
 Each assignment uses an opaque capability handle, and `submit_result` validates the
 output before publishing it atomically. Every retry uses a fresh worker context.
+The job ID also identifies the single execution session for an output directory.
+A later `prepare` atomically supersedes the previous session, reconciles committed
+outputs, and revokes any remaining assignment handles before new work is issued.
 
 The isolation model is an application boundary, not an operating-system security
 boundary. Native subagents still share the host and underlying filesystem. Agent

@@ -28,6 +28,9 @@ import {
 interface Lease { id: string; handle: string }
 interface Prepared {
   job_id: string;
+  session_status: string;
+  superseded_job_id?: string;
+  reclaimed_assignments?: number;
   output_dir: string;
   counts: Record<string, number>;
   worker: { model: string | null; reasoning_effort: string | null };
@@ -600,23 +603,87 @@ describe('agentJobsRuntime', () => {
     ).toEqual({ invalid: true });
   });
 
-  it('resumes a new agent job strictly from committed outputs', async () => {
+  it('supersedes interrupted assignments and reissues them in the new session', async () => {
     const context = await fixture({
       rows: [
         { id: 'done', title: 'Done' },
-        { id: 'remaining', title: 'Remaining' },
+        { id: 'running', title: 'Running' },
+        { id: 'leased', title: 'Leased' },
       ],
     });
     const first = await prepare(context);
-    const [lease] = await nextLeases(context, first.job_id);
-    await complete(context, lease!);
+    const [done, running, leased] = await nextLeases(
+      context,
+      first.job_id,
+      3,
+    );
+    await complete(context, done!);
+    await context.runtime.getAssignment(running!.handle);
 
     const resumed = await prepare(context);
     expect(resumed.job_id).not.toBe(first.job_id);
-    expect(resumed.counts).toMatchObject({ skipped_valid: 1, pending: 1 });
+    expect(resumed).toMatchObject({
+      session_status: 'active',
+      superseded_job_id: first.job_id,
+      reclaimed_assignments: 2,
+      counts: { skipped_valid: 1, pending: 2, active: 0 },
+    });
+    await expect(
+      context.runtime.status(context.outputDir, first.job_id),
+    ).resolves.toMatchObject({
+      session_status: 'superseded',
+      superseded_by_job_id: resumed.job_id,
+      counts: { completed: 1, pending: 2, active: 0 },
+    });
+    await expect(
+      nextLeases(context, first.job_id, 10),
+    ).rejects.toMatchObject({ code: 'session_superseded' });
+    await expect(
+      context.runtime.validate(context.outputDir, first.job_id),
+    ).rejects.toMatchObject({ code: 'session_superseded' });
+    await expect(
+      context.runtime.submitResult(running!.handle, result('late')),
+    ).rejects.toMatchObject({ code: 'invalid_handle' });
+    await expect(
+      context.runtime.getAssignment(leased!.handle),
+    ).rejects.toMatchObject({ code: 'invalid_handle' });
+    for (const lease of [running, leased]) {
+      await expect(
+        readFile(join(context.root, 'registry', `${lease!.handle}.json`)),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    }
     expect(await nextLeases(context, resumed.job_id, 10)).toMatchObject([
-      { id: 'remaining' },
+      { id: 'running' },
+      { id: 'leased' },
     ]);
+  });
+
+  it('preserves a committed result when a new session fences its stale handle', async () => {
+    const context = await fixture();
+    const first = await prepare(context);
+    const [lease] = await nextLeases(context, first.job_id);
+    await context.runtime.getAssignment(lease!.handle);
+    await atomicWriteJson(
+      join(context.outputDir, 'runs', 'one.json'),
+      result('committed-before-restart'),
+      { noClobber: true },
+    );
+
+    const resumed = await prepare(context);
+    expect(resumed).toMatchObject({
+      superseded_job_id: first.job_id,
+      reclaimed_assignments: 0,
+      counts: { skipped_valid: 1, pending: 0, active: 0 },
+    });
+    await expect(
+      nextLeases(context, resumed.job_id, 1),
+    ).resolves.toEqual([]);
+    await expect(
+      context.runtime.submitResult(lease!.handle, result('late')),
+    ).rejects.toMatchObject({ code: 'invalid_handle' });
+    expect(await readStrict(join(context.outputDir, 'runs', 'one.json'))).toEqual(
+      result('committed-before-restart'),
+    );
   });
 
   it('collects in input order and encodes unsafe filenames deterministically', async () => {
