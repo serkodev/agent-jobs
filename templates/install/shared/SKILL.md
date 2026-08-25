@@ -62,7 +62,8 @@ The worker message contains only:
 ```text
 Process exactly one opaque batch assignment.
 ASSIGNMENT_HANDLE: <handle>
-Use only agent_jobs: get_assignment(handle), then submit_result(handle, result_json)
+Use only agent_jobs: get_assignment(handle), then submit_result(handle,
+result_format="json_text", result=<exact JSON object text>)
 or report_failure(handle, code, message). Return only an acknowledgement.
 ```
 

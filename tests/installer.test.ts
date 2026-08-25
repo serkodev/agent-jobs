@@ -136,7 +136,7 @@ describe('agent-jobs installer', () => {
     expect(codexSkill).toContain(`${JSON.stringify(codexScript)} prepare`);
     expect(codexSkill).toContain('init_required');
     expect(codexSkill).toContain('fork_turns: "none"');
-    expect(codexSkill).toContain('result_json');
+    expect(codexSkill).toContain('result_format="json_text"');
 
     const codexConfig = await readFile(join(context.cwd, '.codex', 'config.toml'), 'utf8');
     expect(codexConfig).toContain(`args = [${JSON.stringify(codexScript)}, "mcp"]`);
@@ -158,7 +158,7 @@ describe('agent-jobs installer', () => {
       'multi_agent = false',
       'shell_tool = false',
       'unified_exec = false',
-      'result_json',
+      'result_format="json_text"',
     ]) {
       expect(codexWorker).toContain(restriction);
     }
