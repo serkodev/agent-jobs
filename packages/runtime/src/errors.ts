@@ -5,7 +5,7 @@ export class AgentJobsError extends Error {
 
   constructor(code: string, message: string, details?: unknown) {
     super(message);
-    this.name = "AgentJobsError";
+    this.name = 'AgentJobsError';
     this.code = code;
     if (details !== undefined && details !== null) {
       this.details = details;

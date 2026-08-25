@@ -1,8 +1,9 @@
 /** Persistent batch queue and capability-based worker protocol. */
 
-import { randomBytes, randomUUID } from "node:crypto";
-import { lstat, mkdir, realpath } from "node:fs/promises";
-import { homedir } from "node:os";
+import type { TaskSpec, ValidationDiagnostic } from './spec.js';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { lstat, mkdir, realpath } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import {
   basename,
   dirname,
@@ -10,21 +11,21 @@ import {
   join,
   resolve,
   sep,
-} from "node:path";
-import { fileURLToPath } from "node:url";
+} from 'node:path';
+import process from 'node:process';
 
-import { AgentJobsError } from "./errors.js";
+import { fileURLToPath } from 'node:url';
+import { AgentJobsError } from './errors.js';
 import {
   canonicalizeId,
   loadRecords,
   safeIdFilename,
-} from "./input.js";
+} from './input.js';
 import {
   loadSpec,
+
   validationErrors,
-  type TaskSpec,
-  type ValidationDiagnostic,
-} from "./spec.js";
+} from './spec.js';
 import {
   atomicMove,
   atomicWriteJson,
@@ -33,37 +34,37 @@ import {
   safeUnlink,
   stringifyStrictJson,
   withLock,
-} from "./storage.js";
+} from './storage.js';
 
 export const STATE_VERSION = 1;
-const HANDLE_PREFIX = "aj_";
-const HANDLE_PATTERN = /^aj_[A-Za-z0-9_-]{32,}$/;
+const HANDLE_PREFIX = 'aj_';
+const HANDLE_PATTERN = /^aj_[\w-]{32,}$/;
 const JOB_ID_PATTERN = /^[0-9a-f]{32}$/;
-const ACTIVE_STATUSES = new Set<RecordStatus>(["leased", "running"]);
+const ACTIVE_STATUSES = new Set<RecordStatus>(['leased', 'running']);
 const TERMINAL_STATUSES = new Set<RecordStatus>([
-  "completed",
-  "skipped_valid",
-  "skipped_invalid",
-  "failed",
+  'completed',
+  'skipped_valid',
+  'skipped_invalid',
+  'failed',
 ]);
 const COLLECT_FORMATS = new Set<CollectFormat>([
-  "none",
-  "json",
-  "jsonl",
-  "csv",
+  'none',
+  'json',
+  'jsonl',
+  'csv',
 ]);
 
 export type PathInput = string | URL;
-export type CollectFormat = "none" | "json" | "jsonl" | "csv";
-export type OnError = "stop" | "continue_successes";
-export type RecordStatus =
-  | "pending"
-  | "leased"
-  | "running"
-  | "completed"
-  | "skipped_valid"
-  | "skipped_invalid"
-  | "failed";
+export type CollectFormat = 'none' | 'json' | 'jsonl' | 'csv';
+export type OnError = 'stop' | 'continue_successes';
+export type RecordStatus
+  = | 'pending'
+    | 'leased'
+    | 'running'
+    | 'completed'
+    | 'skipped_valid'
+    | 'skipped_invalid'
+    | 'failed';
 
 type JsonObject = Record<string, unknown>;
 type JsonSchema = Record<string, unknown>;
@@ -183,22 +184,22 @@ export class AgentJobsRuntime {
   public readonly projectRoot: string;
 
   public constructor(options: AgentJobsRuntimeOptions | PathInput = {}) {
-    const structured =
-      typeof options === "string" || options instanceof URL ? {} : options;
+    const structured
+      = typeof options === 'string' || options instanceof URL ? {} : options;
     this.projectRoot = absolutePath(
-      structured.projectRoot ??
-        process.env.AGENT_JOBS_PROJECT_DIR ??
-        process.env.CLAUDE_PROJECT_DIR ??
-        process.cwd(),
+      structured.projectRoot
+      ?? process.env.AGENT_JOBS_PROJECT_DIR
+      ?? process.env.CLAUDE_PROJECT_DIR
+      ?? process.cwd(),
     );
-    const explicit =
-      typeof options === "string" || options instanceof URL
+    const explicit
+      = typeof options === 'string' || options instanceof URL
         ? options
         : options.registryDir;
-    const configured =
-      explicit ??
-      process.env.AGENT_JOBS_REGISTRY_DIR ??
-      join(this.projectRoot, ".agent-jobs", "handles");
+    const configured
+      = explicit
+        ?? process.env.AGENT_JOBS_REGISTRY_DIR
+        ?? join(this.projectRoot, '.agent-jobs', 'handles');
     this.registryDir = absolutePath(configured);
   }
 
@@ -206,15 +207,15 @@ export class AgentJobsRuntime {
   public async prepare(options: PrepareOptions): Promise<JsonObject> {
     const maxRetries = options.maxRetries ?? 1;
     const retryInvalid = options.retryInvalid ?? false;
-    const onError = options.onError ?? "stop";
-    const collectFormat = options.collectFormat ?? "json";
+    const onError = options.onError ?? 'stop';
+    const collectFormat = options.collectFormat ?? 'json';
     const recordsPath = options.recordsPath ?? null;
     const model = options.model ?? null;
     const reasoningEffort = options.reasoningEffort ?? null;
     const maxConcurrency = options.maxConcurrency ?? null;
     const postProcessModel = options.postProcessModel ?? null;
-    const postProcessReasoningEffort =
-      options.postProcessReasoningEffort ?? null;
+    const postProcessReasoningEffort
+      = options.postProcessReasoningEffort ?? null;
 
     this.validateOptions({
       idColumnKey: options.idColumnKey,
@@ -238,18 +239,18 @@ export class AgentJobsRuntime {
 
     const resolvedModel = model ?? spec.model ?? null;
     // A prompt-level model override intentionally clears a spec-level effort.
-    const resolvedEffort =
-      reasoningEffort ?? (model !== null ? null : (spec.reasoningEffort ?? null));
-    const jobId = randomUUID().replaceAll("-", "");
+    const resolvedEffort
+      = reasoningEffort ?? (model !== null ? null : (spec.reasoningEffort ?? null));
+    const jobId = randomUUID().replaceAll('-', '');
     const destination = await canonicalPath(options.outputDir);
-    const runsDir = join(destination, "runs");
-    const jobsDir = join(destination, ".batch", "jobs");
+    const runsDir = join(destination, 'runs');
+    const jobsDir = join(destination, '.batch', 'jobs');
 
     await ensureOutputLayout(destination, true);
     const archiveRoot = join(
       destination,
-      "history",
-      "invalid",
+      'history',
+      'invalid',
       `${archiveStamp()}-${jobId}`,
     );
     const cacheDiagnostics: JsonObject[] = [];
@@ -258,7 +259,7 @@ export class AgentJobsRuntime {
       await ensureOutputLayout(destination, false);
       const runPath = join(runsDir, `${row.safe_id}.json`);
       if (!(await managedFileExists(runPath))) {
-        row.status = "pending";
+        row.status = 'pending';
         continue;
       }
       const errors = await this.validateRunFile(runPath, spec.outputSchema);
@@ -266,11 +267,11 @@ export class AgentJobsRuntime {
         const archivePath = join(archiveRoot, basename(runPath));
         await ensureArchiveDirectory(archiveRoot);
         await atomicMove(runPath, archivePath);
-        row.status = "pending";
+        row.status = 'pending';
         row.archived_invalid_path = archivePath;
         continue;
       }
-      row.status = errors.length > 0 ? "skipped_invalid" : "skipped_valid";
+      row.status = errors.length > 0 ? 'skipped_invalid' : 'skipped_valid';
       row.cache_validation_errors = errors;
       if (errors.length > 0) {
         cacheDiagnostics.push({ id: row.id, path: runPath, errors });
@@ -308,7 +309,7 @@ export class AgentJobsRuntime {
     await ensureOutputLayout(destination, false);
     await atomicWriteJson(statePath, state, { noClobber: true });
     await ensureOutputLayout(destination, false);
-    await atomicWriteJson(join(destination, ".batch", "current.json"), {
+    await atomicWriteJson(join(destination, '.batch', 'current.json'), {
       job_id: jobId,
       state_path: statePath,
     });
@@ -340,8 +341,8 @@ export class AgentJobsRuntime {
     const requested = options.count ?? 1;
     if (!Number.isInteger(requested) || requested < 1) {
       throw new AgentJobsError(
-        "invalid_count",
-        "count must be a positive integer",
+        'invalid_count',
+        'count must be a positive integer',
       );
     }
     const statePath = await this.statePath(outputDir, jobId);
@@ -350,22 +351,24 @@ export class AgentJobsRuntime {
       const state = await this.readState(statePath);
       await ensureStateOutputLayout(state);
       await this.reconcileCommittedRuns(state);
-      const active = state.records.filter((record) =>
+      const active = state.records.filter(record =>
         ACTIVE_STATUSES.has(record.status),
       ).length;
       const configuredCap = state.settings.max_concurrency;
-      const leaseLimit =
-        configuredCap === null
+      const leaseLimit
+        = configuredCap === null
           ? requested
           : Math.min(requested, Math.max(configuredCap - active, 0));
       const assignments: JsonObject[] = [];
 
       for (const record of state.records) {
-        if (assignments.length >= leaseLimit) break;
-        if (record.status !== "pending") continue;
+        if (assignments.length >= leaseLimit)
+          break;
+        if (record.status !== 'pending')
+          continue;
 
         const handle = await this.newHandle();
-        record.status = "leased";
+        record.status = 'leased';
         record.attempts += 1;
         record.handle = handle;
         record.leased_at = now();
@@ -401,19 +404,19 @@ export class AgentJobsRuntime {
       const state = await this.readState(statePath);
       await ensureStateOutputLayout(state);
       const record = recordForRegistry(state, registry, handle);
-      if (record.status === "running") {
+      if (record.status === 'running') {
         throw new AgentJobsError(
-          "handle_consumed",
-          "This assignment handle was already retrieved",
+          'handle_consumed',
+          'This assignment handle was already retrieved',
         );
       }
-      if (record.status !== "leased") {
+      if (record.status !== 'leased') {
         throw new AgentJobsError(
-          "invalid_handle",
-          "This assignment handle is no longer active",
+          'invalid_handle',
+          'This assignment handle is no longer active',
         );
       }
-      record.status = "running";
+      record.status = 'running';
       record.started_at = now();
       await this.saveState(statePath, state);
 
@@ -443,17 +446,17 @@ export class AgentJobsRuntime {
   public async submitResult(handle: string, result: unknown): Promise<JsonObject> {
     if (!isObject(result)) {
       throw new AgentJobsError(
-        "output_validation_failed",
-        "Worker result must be a JSON object",
-        [{ path: "", message: "result is not an object" }],
+        'output_validation_failed',
+        'Worker result must be a JSON object',
+        [{ path: '', message: 'result is not an object' }],
       );
     }
     const jsonProblem = strictJsonProblem(result);
     if (jsonProblem !== null) {
       throw new AgentJobsError(
-        "output_validation_failed",
-        "Worker result must contain only strict JSON values",
-        [{ path: "", message: jsonProblem, validator: "json" }],
+        'output_validation_failed',
+        'Worker result must contain only strict JSON values',
+        [{ path: '', message: jsonProblem, validator: 'json' }],
       );
     }
 
@@ -463,20 +466,20 @@ export class AgentJobsRuntime {
       const state = await this.readState(statePath);
       await ensureStateOutputLayout(state);
       const record = recordForRegistry(state, registry, handle);
-      if (record.status !== "running") {
+      if (record.status !== 'running') {
         const code = TERMINAL_STATUSES.has(record.status)
-          ? "handle_consumed"
-          : "invalid_handle";
+          ? 'handle_consumed'
+          : 'invalid_handle';
         throw new AgentJobsError(
           code,
-          "This assignment handle cannot submit a result",
+          'This assignment handle cannot submit a result',
         );
       }
       const errors = validationErrors(result, state.spec.output_schema);
       if (errors.length > 0) {
         throw new AgentJobsError(
-          "output_validation_failed",
-          "Worker result does not satisfy output_schema",
+          'output_validation_failed',
+          'Worker result does not satisfy output_schema',
           errors,
         );
       }
@@ -486,16 +489,16 @@ export class AgentJobsRuntime {
         await ensureStateOutputLayout(state);
         await atomicWriteJson(runPath, result, { noClobber: true });
       } catch (error) {
-        if (error instanceof AgentJobsError && error.code === "target_exists") {
+        if (error instanceof AgentJobsError && error.code === 'target_exists') {
           throw new AgentJobsError(
-            "output_exists",
-            "A result already exists for this row; refusing to overwrite it",
+            'output_exists',
+            'A result already exists for this row; refusing to overwrite it',
             error.details,
           );
         }
         throw error;
       }
-      record.status = "completed";
+      record.status = 'completed';
       record.completed_at = now();
       record.handle = null;
       await this.saveState(statePath, state);
@@ -509,7 +512,7 @@ export class AgentJobsRuntime {
       ok: true,
       id: outcome.record.id,
       path: outcome.runPath,
-      status: "completed",
+      status: 'completed',
     };
   }
 
@@ -519,16 +522,16 @@ export class AgentJobsRuntime {
     code: string,
     message: string,
   ): Promise<JsonObject> {
-    if (typeof code !== "string" || code.trim().length === 0) {
+    if (typeof code !== 'string' || code.trim().length === 0) {
       throw new AgentJobsError(
-        "invalid_failure",
-        "Failure code must be non-empty",
+        'invalid_failure',
+        'Failure code must be non-empty',
       );
     }
-    if (typeof message !== "string" || message.trim().length === 0) {
+    if (typeof message !== 'string' || message.trim().length === 0) {
       throw new AgentJobsError(
-        "invalid_failure",
-        "Failure message must be non-empty",
+        'invalid_failure',
+        'Failure message must be non-empty',
       );
     }
     const registry = await this.readRegistry(handle);
@@ -539,8 +542,8 @@ export class AgentJobsRuntime {
       const record = recordForRegistry(state, registry, handle);
       if (!ACTIVE_STATUSES.has(record.status)) {
         throw new AgentJobsError(
-          "handle_consumed",
-          "This assignment handle is no longer active",
+          'handle_consumed',
+          'This assignment handle is no longer active',
         );
       }
       const committedPath = runPathFor(state, record);
@@ -551,7 +554,7 @@ export class AgentJobsRuntime {
         );
         if (committedErrors.length === 0) {
           const staleHandle = record.handle;
-          record.status = "completed";
+          record.status = 'completed';
           record.completed_at ??= now();
           record.cache_validation_errors = [];
           record.handle = null;
@@ -574,11 +577,11 @@ export class AgentJobsRuntime {
       record.handle = null;
       const terminal = record.attempts > state.settings.max_retries;
       if (terminal) {
-        record.status = "failed";
+        record.status = 'failed';
         await ensureStateOutputLayout(state);
         await atomicWriteJson(errorPathFor(state, record), failure);
       } else {
-        record.status = "pending";
+        record.status = 'pending';
       }
       await this.saveState(statePath, state);
       return { record, terminal, reconciled: false };
@@ -612,7 +615,7 @@ export class AgentJobsRuntime {
         job_id: state.job_id,
         output_dir: state.output_dir,
         counts: counts(state),
-        rows: state.records.map((record) => ({
+        rows: state.records.map(record => ({
           id: record.id,
           status: record.status,
           attempts: record.attempts,
@@ -638,7 +641,7 @@ export class AgentJobsRuntime {
       }
       const report = await this.buildValidationReport(state);
       await ensureStateOutputLayout(state);
-      await atomicWriteJson(join(state.output_dir, "report.json"), report);
+      await atomicWriteJson(join(state.output_dir, 'report.json'), report);
       return { ok: true, ...report };
     });
   }
@@ -653,12 +656,12 @@ export class AgentJobsRuntime {
     return await withLock(lockPath(statePath), async () => {
       const state = await this.readState(statePath);
       await ensureStateOutputLayout(state);
-      const selectedFormat =
-        options.format ?? state.settings.collect_format;
+      const selectedFormat
+        = options.format ?? state.settings.collect_format;
       if (!COLLECT_FORMATS.has(selectedFormat)) {
         throw new AgentJobsError(
-          "invalid_collect_format",
-          "format must be none, json, jsonl, or csv",
+          'invalid_collect_format',
+          'format must be none, json, jsonl, or csv',
         );
       }
       if (await this.reconcileCommittedRuns(state)) {
@@ -666,20 +669,20 @@ export class AgentJobsRuntime {
       }
       const report = await this.buildValidationReport(state);
       await ensureStateOutputLayout(state);
-      await atomicWriteJson(join(state.output_dir, "report.json"), report);
-      if (!report.valid && state.settings.on_error === "stop") {
+      await atomicWriteJson(join(state.output_dir, 'report.json'), report);
+      if (!report.valid && state.settings.on_error === 'stop') {
         throw new AgentJobsError(
-          "batch_failed",
-          "Collection is blocked because final validation failed",
+          'batch_failed',
+          'Collection is blocked because final validation failed',
           report.errors,
         );
       }
       const records = await this.validCollectedRecords(state);
-      if (selectedFormat === "none") {
+      if (selectedFormat === 'none') {
         return {
           ok: true,
           job_id: state.job_id,
-          format: "none",
+          format: 'none',
           path: null,
           count: records.length,
         };
@@ -717,136 +720,136 @@ export class AgentJobsRuntime {
   ): Promise<JsonObject> {
     const checks: JsonObject[] = [];
     const nodeVersion = process.versions.node;
-    const [majorText = "0", minorText = "0"] = nodeVersion.split(".");
+    const [majorText = '0', minorText = '0'] = nodeVersion.split('.');
     const major = Number.parseInt(majorText, 10);
     const minor = Number.parseInt(minorText, 10);
     const nodeSupported = major > 20 || (major === 20 && minor >= 6);
     checks.push({
-      name: "node",
+      name: 'node',
       ok: nodeSupported,
-      detail: { version: nodeVersion, required: ">=20.6" },
+      detail: { version: nodeVersion, required: '>=20.6' },
     });
 
     const userHome = homedir();
     const hostFiles = {
       codex: [
         {
-          scope: "project",
+          scope: 'project',
           paths: [
-            join(this.projectRoot, "AGENTS.md"),
-            join(this.projectRoot, ".codex", "config.toml"),
-            join(this.projectRoot, ".codex", "agents", "agent_job_worker.toml"),
+            join(this.projectRoot, 'AGENTS.md'),
+            join(this.projectRoot, '.codex', 'config.toml'),
+            join(this.projectRoot, '.codex', 'agents', 'agent_job_worker.toml'),
             join(
               this.projectRoot,
-              ".codex",
-              "agents",
-              "agent_job_postprocessor.toml",
+              '.codex',
+              'agents',
+              'agent_job_postprocessor.toml',
             ),
             join(
               this.projectRoot,
-              ".agents",
-              "skills",
-              "agent-jobs",
-              "SKILL.md",
+              '.agents',
+              'skills',
+              'agent-jobs',
+              'SKILL.md',
             ),
             join(
               this.projectRoot,
-              ".agents",
-              "skills",
-              "agent-jobs",
-              "scripts",
-              "agent-jobs.mjs",
+              '.agents',
+              'skills',
+              'agent-jobs',
+              'scripts',
+              'agent-jobs.mjs',
             ),
           ],
         },
         {
-          scope: "global",
+          scope: 'global',
           paths: [
-            join(userHome, ".codex", "AGENTS.md"),
-            join(userHome, ".codex", "config.toml"),
-            join(userHome, ".codex", "agents", "agent_job_worker.toml"),
-            join(userHome, ".codex", "agents", "agent_job_postprocessor.toml"),
-            join(userHome, ".agents", "skills", "agent-jobs", "SKILL.md"),
+            join(userHome, '.codex', 'AGENTS.md'),
+            join(userHome, '.codex', 'config.toml'),
+            join(userHome, '.codex', 'agents', 'agent_job_worker.toml'),
+            join(userHome, '.codex', 'agents', 'agent_job_postprocessor.toml'),
+            join(userHome, '.agents', 'skills', 'agent-jobs', 'SKILL.md'),
             join(
               userHome,
-              ".agents",
-              "skills",
-              "agent-jobs",
-              "scripts",
-              "agent-jobs.mjs",
+              '.agents',
+              'skills',
+              'agent-jobs',
+              'scripts',
+              'agent-jobs.mjs',
             ),
           ],
         },
         {
-          scope: "development",
+          scope: 'development',
           paths: [
-            join(this.projectRoot, "AGENTS.md"),
-            join(this.projectRoot, ".codex", "config.toml"),
-            join(this.projectRoot, ".codex", "agents", "agent_job_worker.toml"),
+            join(this.projectRoot, 'AGENTS.md'),
+            join(this.projectRoot, '.codex', 'config.toml'),
+            join(this.projectRoot, '.codex', 'agents', 'agent_job_worker.toml'),
             join(
               this.projectRoot,
-              ".codex",
-              "agents",
-              "agent_job_postprocessor.toml",
+              '.codex',
+              'agents',
+              'agent_job_postprocessor.toml',
             ),
             join(
               this.projectRoot,
-              ".agents",
-              "skills",
-              "agent-jobs",
-              "SKILL.md",
+              '.agents',
+              'skills',
+              'agent-jobs',
+              'SKILL.md',
             ),
-            join(this.projectRoot, "dist", "agent-jobs.mjs"),
+            join(this.projectRoot, 'dist', 'agent-jobs.mjs'),
           ],
         },
       ],
       claude: [
         {
-          scope: "project",
+          scope: 'project',
           paths: [
-            join(this.projectRoot, "CLAUDE.md"),
-            join(this.projectRoot, ".mcp.json"),
-            join(this.projectRoot, ".claude", "settings.local.json"),
-            join(this.projectRoot, ".claude", "agents", "agent_job_worker.md"),
+            join(this.projectRoot, 'CLAUDE.md'),
+            join(this.projectRoot, '.mcp.json'),
+            join(this.projectRoot, '.claude', 'settings.local.json'),
+            join(this.projectRoot, '.claude', 'agents', 'agent_job_worker.md'),
             join(
               this.projectRoot,
-              ".claude",
-              "agents",
-              "agent_job_postprocessor.md",
+              '.claude',
+              'agents',
+              'agent_job_postprocessor.md',
             ),
             join(
               this.projectRoot,
-              ".claude",
-              "skills",
-              "agent-jobs",
-              "SKILL.md",
+              '.claude',
+              'skills',
+              'agent-jobs',
+              'SKILL.md',
             ),
             join(
               this.projectRoot,
-              ".claude",
-              "skills",
-              "agent-jobs",
-              "scripts",
-              "agent-jobs.mjs",
+              '.claude',
+              'skills',
+              'agent-jobs',
+              'scripts',
+              'agent-jobs.mjs',
             ),
           ],
         },
         {
-          scope: "global",
+          scope: 'global',
           paths: [
-            join(userHome, ".claude", "CLAUDE.md"),
-            join(userHome, ".claude.json"),
-            join(userHome, ".claude", "settings.json"),
-            join(userHome, ".claude", "agents", "agent_job_worker.md"),
-            join(userHome, ".claude", "agents", "agent_job_postprocessor.md"),
-            join(userHome, ".claude", "skills", "agent-jobs", "SKILL.md"),
+            join(userHome, '.claude', 'CLAUDE.md'),
+            join(userHome, '.claude.json'),
+            join(userHome, '.claude', 'settings.json'),
+            join(userHome, '.claude', 'agents', 'agent_job_worker.md'),
+            join(userHome, '.claude', 'agents', 'agent_job_postprocessor.md'),
+            join(userHome, '.claude', 'skills', 'agent-jobs', 'SKILL.md'),
             join(
               userHome,
-              ".claude",
-              "skills",
-              "agent-jobs",
-              "scripts",
-              "agent-jobs.mjs",
+              '.claude',
+              'skills',
+              'agent-jobs',
+              'scripts',
+              'agent-jobs.mjs',
             ),
           ],
         },
@@ -874,14 +877,14 @@ export class AgentJobsRuntime {
       installation[host] = { ok: hostInstalled, candidates: details };
     }
     checks.push({
-      name: "installation",
+      name: 'installation',
       ok: installed,
       detail: {
-        code: installed ? "installed" : "init_required",
+        code: installed ? 'installed' : 'init_required',
         hosts: installation,
         hint: installed
           ? null
-          : "Run agent-jobs init --yes (or use the published/local npx package).",
+          : 'Run agent-jobs init --yes (or use the published/local npx package).',
       },
     });
 
@@ -889,18 +892,18 @@ export class AgentJobsRuntime {
       await mkdir(this.registryDir, { recursive: true });
       const probe = join(
         this.registryDir,
-        `.doctor-${randomUUID().replaceAll("-", "")}`,
+        `.doctor-${randomUUID().replaceAll('-', '')}`,
       );
-      await atomicWriteText(probe, "ok\n", { noClobber: true });
+      await atomicWriteText(probe, 'ok\n', { noClobber: true });
       await safeUnlink(probe);
       checks.push({
-        name: "handle_registry",
+        name: 'handle_registry',
         ok: true,
         detail: this.registryDir,
       });
     } catch (error) {
       checks.push({
-        name: "handle_registry",
+        name: 'handle_registry',
         ok: false,
         detail: errorMessage(error),
       });
@@ -909,10 +912,10 @@ export class AgentJobsRuntime {
     if (options.taskSpec !== undefined && options.taskSpec !== null) {
       try {
         const parsed = await loadSpec(options.taskSpec);
-        checks.push({ name: "task_spec", ok: true, detail: parsed.name });
+        checks.push({ name: 'task_spec', ok: true, detail: parsed.name });
       } catch (error) {
         checks.push({
-          name: "task_spec",
+          name: 'task_spec',
           ok: false,
           detail:
             error instanceof AgentJobsError
@@ -924,10 +927,10 @@ export class AgentJobsRuntime {
     if (options.outputDir !== undefined && options.outputDir !== null) {
       try {
         const current = await this.statePath(options.outputDir, null);
-        checks.push({ name: "output_dir", ok: true, detail: current });
+        checks.push({ name: 'output_dir', ok: true, detail: current });
       } catch (error) {
         checks.push({
-          name: "output_dir",
+          name: 'output_dir',
           ok: false,
           detail:
             error instanceof AgentJobsError
@@ -938,7 +941,7 @@ export class AgentJobsRuntime {
     }
 
     return {
-      ok: checks.every((check) => check.ok === true),
+      ok: checks.every(check => check.ok === true),
       node: nodeVersion,
       node_executable: process.execPath,
       project_root: this.projectRoot,
@@ -964,14 +967,15 @@ export class AgentJobsRuntime {
       if (!Object.hasOwn(source, idColumnKey)) {
         diagnostics.push({
           row: index,
-          code: "missing_id",
+          code: 'missing_id',
           path: `/${idColumnKey}`,
         });
       } else {
         try {
           identifier = canonicalizeId(source[idColumnKey]);
         } catch (error) {
-          if (!(error instanceof AgentJobsError)) throw error;
+          if (!(error instanceof AgentJobsError))
+            throw error;
           diagnostics.push({
             row: index,
             code: error.code,
@@ -988,7 +992,7 @@ export class AgentJobsRuntime {
           duplicateDiagnostics.push({
             id: identifier,
             rows: [firstIndex, index],
-            code: "duplicate_id",
+            code: 'duplicate_id',
           });
         } else {
           identifiers.set(identifier, index);
@@ -999,7 +1003,7 @@ export class AgentJobsRuntime {
         if (existing !== undefined && existing !== identifier) {
           diagnostics.push({
             row: index,
-            code: "id_filename_collision",
+            code: 'id_filename_collision',
             id: identifier,
           });
         }
@@ -1012,15 +1016,16 @@ export class AgentJobsRuntime {
       // Object.prototype's legacy setter.
       const projected = Object.create(null) as JsonObject;
       for (const key of Object.keys(properties)) {
-        if (Object.hasOwn(source, key)) projected[key] = source[key];
+        if (Object.hasOwn(source, key))
+          projected[key] = source[key];
       }
       const jsonProblem = strictJsonProblem(projected);
       if (jsonProblem !== null) {
         diagnostics.push({
           row: index,
           id: identifier,
-          code: "input_not_json",
-          path: "",
+          code: 'input_not_json',
+          path: '',
           message: jsonProblem,
         });
       }
@@ -1028,7 +1033,7 @@ export class AgentJobsRuntime {
         diagnostics.push({
           row: index,
           id: identifier,
-          code: "input_schema",
+          code: 'input_schema',
           ...error,
         });
       }
@@ -1038,7 +1043,7 @@ export class AgentJobsRuntime {
         id: identifier ?? `invalid-row-${index}`,
         safe_id: safeId,
         input: projected,
-        status: "pending",
+        status: 'pending',
         attempts: 0,
         handle: null,
         last_error: null,
@@ -1047,14 +1052,14 @@ export class AgentJobsRuntime {
 
     diagnostics.push(...duplicateDiagnostics);
     if (diagnostics.length > 0) {
-      const code =
-        duplicateDiagnostics.length > 0 &&
-        diagnostics.length === duplicateDiagnostics.length
-          ? "duplicate_id"
-          : "input_validation_failed";
+      const code
+        = duplicateDiagnostics.length > 0
+          && diagnostics.length === duplicateDiagnostics.length
+          ? 'duplicate_id'
+          : 'input_validation_failed';
       throw new AgentJobsError(
         code,
-        "Input preflight failed; no workers were scheduled",
+        'Input preflight failed; no workers were scheduled',
         diagnostics,
       );
     }
@@ -1071,67 +1076,67 @@ export class AgentJobsRuntime {
     optionalStrings: Record<string, unknown>;
   }): void {
     if (
-      typeof options.idColumnKey !== "string" ||
-      options.idColumnKey.trim().length === 0
+      typeof options.idColumnKey !== 'string'
+      || options.idColumnKey.trim().length === 0
     ) {
       throw new AgentJobsError(
-        "invalid_id_column_key",
-        "id_column_key must be non-empty",
+        'invalid_id_column_key',
+        'id_column_key must be non-empty',
       );
     }
     if (
-      options.maxConcurrency !== null &&
-      (typeof options.maxConcurrency !== "number" ||
-        !Number.isInteger(options.maxConcurrency) ||
-        options.maxConcurrency < 1)
+      options.maxConcurrency !== null
+      && (typeof options.maxConcurrency !== 'number'
+        || !Number.isInteger(options.maxConcurrency)
+        || options.maxConcurrency < 1)
     ) {
       throw new AgentJobsError(
-        "invalid_max_concurrency",
-        "max_concurrency must be positive",
+        'invalid_max_concurrency',
+        'max_concurrency must be positive',
       );
     }
     if (
-      typeof options.maxRetries !== "number" ||
-      !Number.isInteger(options.maxRetries) ||
-      options.maxRetries < 0
+      typeof options.maxRetries !== 'number'
+      || !Number.isInteger(options.maxRetries)
+      || options.maxRetries < 0
     ) {
       throw new AgentJobsError(
-        "invalid_max_retries",
-        "max_retries must be non-negative",
+        'invalid_max_retries',
+        'max_retries must be non-negative',
       );
     }
-    if (typeof options.retryInvalid !== "boolean") {
+    if (typeof options.retryInvalid !== 'boolean') {
       throw new AgentJobsError(
-        "invalid_retry_invalid",
-        "retry_invalid must be a boolean",
-      );
-    }
-    if (
-      options.onError !== "stop" &&
-      options.onError !== "continue_successes"
-    ) {
-      throw new AgentJobsError(
-        "invalid_on_error",
-        "on_error must be stop or continue_successes",
+        'invalid_retry_invalid',
+        'retry_invalid must be a boolean',
       );
     }
     if (
-      typeof options.collectFormat !== "string" ||
-      !COLLECT_FORMATS.has(options.collectFormat as CollectFormat)
+      options.onError !== 'stop'
+      && options.onError !== 'continue_successes'
     ) {
       throw new AgentJobsError(
-        "invalid_collect_format",
-        "collect_format must be none, json, jsonl, or csv",
+        'invalid_on_error',
+        'on_error must be stop or continue_successes',
+      );
+    }
+    if (
+      typeof options.collectFormat !== 'string'
+      || !COLLECT_FORMATS.has(options.collectFormat as CollectFormat)
+    ) {
+      throw new AgentJobsError(
+        'invalid_collect_format',
+        'collect_format must be none, json, jsonl, or csv',
       );
     }
     for (const [name, value] of Object.entries(options.optionalStrings)) {
       if (
-        value !== null &&
-        (typeof value !== "string" ||
-          (name !== "recordsPath" && value.trim().length === 0))
+        value !== null
+        && (typeof value !== 'string'
+          || (name !== 'recordsPath' && value.trim().length === 0))
       ) {
         throw new AgentJobsError(
-          "invalid_option",
+          'invalid_option',
           `${camelToSnake(name)} must be a non-empty string`,
         );
       }
@@ -1146,31 +1151,31 @@ export class AgentJobsRuntime {
     await ensureOutputLayout(destination, false);
     let selected: unknown = jobId;
     if (selected === null) {
-      const pointerPath = join(destination, ".batch", "current.json");
+      const pointerPath = join(destination, '.batch', 'current.json');
       if (!(await managedFileExists(pointerPath))) {
         throw new AgentJobsError(
-          "job_not_found",
+          'job_not_found',
           `No current agent job exists in ${destination}`,
         );
       }
       const pointer = await readJson(pointerPath);
       selected = isObject(pointer) ? pointer.job_id : null;
     }
-    if (typeof selected !== "string" || !JOB_ID_PATTERN.test(selected)) {
+    if (typeof selected !== 'string' || !JOB_ID_PATTERN.test(selected)) {
       throw new AgentJobsError(
-        "invalid_job_id",
-        "Invalid job ID",
+        'invalid_job_id',
+        'Invalid job ID',
       );
     }
     const path = join(
       destination,
-      ".batch",
-      "jobs",
+      '.batch',
+      'jobs',
       `${selected}.json`,
     );
     if (!(await managedFileExists(path))) {
       throw new AgentJobsError(
-        "job_not_found",
+        'job_not_found',
         `Agent job does not exist: ${selected}`,
         { path },
       );
@@ -1182,14 +1187,14 @@ export class AgentJobsRuntime {
     const value = await readJson(path);
     if (!isObject(value) || value.state_version !== STATE_VERSION) {
       throw new AgentJobsError(
-        "invalid_job",
-        "Agent job state is missing or incompatible",
+        'invalid_job',
+        'Agent job state is missing or incompatible',
       );
     }
     if (!Array.isArray(value.records)) {
       throw new AgentJobsError(
-        "invalid_job",
-        "Agent job items are invalid",
+        'invalid_job',
+        'Agent job items are invalid',
       );
     }
     return value as unknown as AgentJobState;
@@ -1203,16 +1208,17 @@ export class AgentJobsRuntime {
   private async newHandle(): Promise<string> {
     await mkdir(this.registryDir, { recursive: true });
     for (;;) {
-      const handle = `${HANDLE_PREFIX}${randomBytes(32).toString("base64url")}`;
-      if (!(await pathExists(this.registryPath(handle)))) return handle;
+      const handle = `${HANDLE_PREFIX}${randomBytes(32).toString('base64url')}`;
+      if (!(await pathExists(this.registryPath(handle))))
+        return handle;
     }
   }
 
   private registryPath(handle: string): string {
-    if (typeof handle !== "string" || !HANDLE_PATTERN.test(handle)) {
+    if (typeof handle !== 'string' || !HANDLE_PATTERN.test(handle)) {
       throw new AgentJobsError(
-        "invalid_handle",
-        "Assignment handle is invalid",
+        'invalid_handle',
+        'Assignment handle is invalid',
       );
     }
     return join(this.registryDir, `${handle}.json`);
@@ -1222,21 +1228,21 @@ export class AgentJobsRuntime {
     const path = this.registryPath(handle);
     if (!(await pathExists(path))) {
       throw new AgentJobsError(
-        "invalid_handle",
-        "Assignment handle is unknown or expired",
+        'invalid_handle',
+        'Assignment handle is unknown or expired',
       );
     }
     await ensureRealFile(path);
     const value = await readJson(path);
     if (
-      !isObject(value) ||
-      value.handle !== handle ||
-      typeof value.state_path !== "string" ||
-      !Number.isInteger(value.record_index)
+      !isObject(value)
+      || value.handle !== handle
+      || typeof value.state_path !== 'string'
+      || !Number.isInteger(value.record_index)
     ) {
       throw new AgentJobsError(
-        "invalid_handle",
-        "Assignment registry entry is invalid",
+        'invalid_handle',
+        'Assignment registry entry is invalid',
       );
     }
     return value as unknown as RegistryEntry;
@@ -1246,29 +1252,29 @@ export class AgentJobsRuntime {
     const statePath = registry.state_path;
     const jobId = registry.job_id;
     if (
-      !isAbsolute(statePath) ||
-      typeof jobId !== "string" ||
-      !JOB_ID_PATTERN.test(jobId) ||
-      basename(statePath) !== `${jobId}.json` ||
-      basename(dirname(statePath)) !== "jobs" ||
-      basename(dirname(dirname(statePath))) !== ".batch"
+      !isAbsolute(statePath)
+      || typeof jobId !== 'string'
+      || !JOB_ID_PATTERN.test(jobId)
+      || basename(statePath) !== `${jobId}.json`
+      || basename(dirname(statePath)) !== 'jobs'
+      || basename(dirname(dirname(statePath))) !== '.batch'
     ) {
       throw new AgentJobsError(
-        "invalid_handle",
-        "Handle state path is invalid",
+        'invalid_handle',
+        'Handle state path is invalid',
       );
     }
     const destination = dirname(dirname(dirname(statePath)));
     const expected = join(
       destination,
-      ".batch",
-      "jobs",
+      '.batch',
+      'jobs',
       `${jobId}.json`,
     );
     if (statePath !== expected) {
       throw new AgentJobsError(
-        "invalid_handle",
-        "Handle state path is invalid",
+        'invalid_handle',
+        'Handle state path is invalid',
       );
     }
     await ensureOutputLayout(destination, false);
@@ -1286,7 +1292,7 @@ export class AgentJobsRuntime {
       return validationErrors(value, schema);
     } catch (error) {
       if (error instanceof AgentJobsError) {
-        return [{ path: "", message: error.message, validator: "json" }];
+        return [{ path: '', message: error.message, validator: 'json' }];
       }
       throw error;
     }
@@ -1298,33 +1304,37 @@ export class AgentJobsRuntime {
     let changed = false;
     for (const record of state.records) {
       if (
-        !ACTIVE_STATUSES.has(record.status) &&
-        record.status !== "pending" &&
-        record.status !== "failed"
+        !ACTIVE_STATUSES.has(record.status)
+        && record.status !== 'pending'
+        && record.status !== 'failed'
       ) {
         continue;
       }
       const path = runPathFor(state, record);
-      if (!(await managedFileExists(path))) continue;
+      if (!(await managedFileExists(path)))
+        continue;
       const errors = await this.validateRunFile(
         path,
         state.spec.output_schema,
       );
-      const wasFailed = record.status === "failed";
+      const wasFailed = record.status === 'failed';
       // An invalid file cannot erase a durable terminal worker failure. A valid
       // result, however, is the authoritative row outcome even when it arrived
       // after failure bookkeeping.
-      if (wasFailed && errors.length > 0) continue;
-      record.status = errors.length > 0 ? "skipped_invalid" : "completed";
+      if (wasFailed && errors.length > 0)
+        continue;
+      record.status = errors.length > 0 ? 'skipped_invalid' : 'completed';
       record.cache_validation_errors = errors;
       if (errors.length === 0) {
         record.completed_at ??= now();
-        if (wasFailed) record.last_error = null;
+        if (wasFailed)
+          record.last_error = null;
         await safeUnlink(errorPathFor(state, record));
       }
       const handle = record.handle;
       record.handle = null;
-      if (handle !== null) await safeUnlink(this.registryPath(handle));
+      if (handle !== null)
+        await safeUnlink(this.registryPath(handle));
       changed = true;
     }
     return changed;
@@ -1341,11 +1351,11 @@ export class AgentJobsRuntime {
     for (const record of state.records) {
       const path = runPathFor(state, record);
       if (!(await managedFileExists(path))) {
-        if (record.status === "failed") {
+        if (record.status === 'failed') {
           failed += 1;
           errors.push({
             id: record.id,
-            code: "worker_failed",
+            code: 'worker_failed',
             path: errorPathFor(state, record),
             error: record.last_error,
           });
@@ -1353,7 +1363,7 @@ export class AgentJobsRuntime {
           missing += 1;
           errors.push({
             id: record.id,
-            code: "missing_output",
+            code: 'missing_output',
             status: record.status,
             path,
           });
@@ -1368,7 +1378,7 @@ export class AgentJobsRuntime {
         invalid += 1;
         errors.push({
           id: record.id,
-          code: "invalid_output",
+          code: 'invalid_output',
           path,
           errors: rowErrors,
         });
@@ -1399,19 +1409,21 @@ export class AgentJobsRuntime {
     const collected: JsonObject[] = [];
     for (const record of state.records) {
       const path = runPathFor(state, record);
-      if (!(await managedFileExists(path))) continue;
+      if (!(await managedFileExists(path)))
+        continue;
       await ensureRealFile(path);
       const value = await readJson(path);
       if (
-        !isObject(value) ||
-        validationErrors(value, state.spec.output_schema).length > 0
+        !isObject(value)
+        || validationErrors(value, state.spec.output_schema).length > 0
       ) {
         continue;
       }
       const merged = Object.create(null) as JsonObject;
       merged[state.id_column_key] = record.id;
       for (const [key, item] of Object.entries(value)) {
-        if (key !== state.id_column_key) merged[key] = item;
+        if (key !== state.id_column_key)
+          merged[key] = item;
       }
       collected.push(merged);
     }
@@ -1452,19 +1464,19 @@ function recordForRegistry(
 ): AgentJobItemRecord {
   if (state.job_id !== registry.job_id) {
     throw new AgentJobsError(
-      "invalid_handle",
-      "Handle agent job does not match",
+      'invalid_handle',
+      'Handle agent job does not match',
     );
   }
   const index = registry.record_index;
   if (index < 0 || index >= state.records.length) {
-    throw new AgentJobsError("invalid_handle", "Handle row does not exist");
+    throw new AgentJobsError('invalid_handle', 'Handle row does not exist');
   }
   const record = state.records[index];
   if (record === undefined || record.index !== index || record.handle !== handle) {
     throw new AgentJobsError(
-      "invalid_handle",
-      "Handle is no longer current",
+      'invalid_handle',
+      'Handle is no longer current',
     );
   }
   return record;
@@ -1475,21 +1487,21 @@ function counts(state: AgentJobState): QueueCounts {
   for (const record of state.records) {
     statuses.set(record.status, (statuses.get(record.status) ?? 0) + 1);
   }
-  const leased = statuses.get("leased") ?? 0;
-  const running = statuses.get("running") ?? 0;
-  const skippedValid = statuses.get("skipped_valid") ?? 0;
-  const skippedInvalid = statuses.get("skipped_invalid") ?? 0;
+  const leased = statuses.get('leased') ?? 0;
+  const running = statuses.get('running') ?? 0;
+  const skippedValid = statuses.get('skipped_valid') ?? 0;
+  const skippedInvalid = statuses.get('skipped_invalid') ?? 0;
   return {
     total: state.records.length,
-    pending: statuses.get("pending") ?? 0,
+    pending: statuses.get('pending') ?? 0,
     leased,
     running,
     active: leased + running,
-    completed: statuses.get("completed") ?? 0,
+    completed: statuses.get('completed') ?? 0,
     skipped: skippedValid + skippedInvalid,
     skipped_valid: skippedValid,
     skipped_invalid: skippedInvalid,
-    failed: statuses.get("failed") ?? 0,
+    failed: statuses.get('failed') ?? 0,
   };
 }
 
@@ -1497,14 +1509,14 @@ function runPathFor(
   state: AgentJobState,
   record: AgentJobItemRecord,
 ): string {
-  return join(state.output_dir, "runs", `${record.safe_id}.json`);
+  return join(state.output_dir, 'runs', `${record.safe_id}.json`);
 }
 
 function errorPathFor(
   state: AgentJobState,
   record: AgentJobItemRecord,
 ): string {
-  return join(state.output_dir, "errors", `${record.safe_id}.json`);
+  return join(state.output_dir, 'errors', `${record.safe_id}.json`);
 }
 
 function lockPath(statePath: string): string {
@@ -1513,63 +1525,67 @@ function lockPath(statePath: string): string {
 
 async function writeCollection(
   path: string,
-  format: Exclude<CollectFormat, "none">,
+  format: Exclude<CollectFormat, 'none'>,
   records: JsonObject[],
   idKey: string,
   outputSchema: JsonSchema,
   outputFieldOrder?: string[],
 ): Promise<void> {
-  if (format === "json") {
+  if (format === 'json') {
     await atomicWriteText(
       path,
       `${stringifyStrictJson(records, { pretty: true })}\n`,
     );
     return;
   }
-  if (format === "jsonl") {
+  if (format === 'jsonl') {
     const text = records
-      .map((record) => `${stringifyStrictJson(record)}\n`)
-      .join("");
+      .map(record => `${stringifyStrictJson(record)}\n`)
+      .join('');
     await atomicWriteText(path, text);
     return;
   }
 
   const fields = [idKey];
-  const declaredFields =
-    outputFieldOrder ?? Object.keys(schemaProperties(outputSchema));
+  const declaredFields
+    = outputFieldOrder ?? Object.keys(schemaProperties(outputSchema));
   for (const key of declaredFields) {
-    if (!fields.includes(key)) fields.push(key);
+    if (!fields.includes(key))
+      fields.push(key);
   }
   for (const record of records) {
     for (const key of Object.keys(record)) {
-      if (!fields.includes(key)) fields.push(key);
+      if (!fields.includes(key))
+        fields.push(key);
     }
   }
-  const lines = [fields.map(csvCell).join(",")];
+  const lines = [fields.map(csvCell).join(',')];
   for (const record of records) {
     lines.push(
       fields
-        .map((field) =>
+        .map(field =>
           csvCell(
-            Object.hasOwn(record, field) ? csvValue(record[field]) : "",
+            Object.hasOwn(record, field) ? csvValue(record[field]) : '',
           ),
         )
-        .join(","),
+        .join(','),
     );
   }
-  await atomicWriteText(path, `${lines.join("\r\n")}\r\n`);
+  await atomicWriteText(path, `${lines.join('\r\n')}\r\n`);
 }
 
 function csvValue(value: unknown): string | number | bigint {
-  if (value === null || value === undefined) return "";
-  if (typeof value === "boolean") return value ? "true" : "false";
+  if (value === null || value === undefined)
+    return '';
+  if (typeof value === 'boolean')
+    return value ? 'true' : 'false';
   if (Array.isArray(value) || isObject(value)) {
     return stringifyStrictJson(value);
   }
   if (
-    typeof value === "string" ||
-    typeof value === "number" ||
-    typeof value === "bigint"
+    typeof value === 'string'
+    || typeof value === 'number'
+    || typeof value === 'bigint'
   ) {
     return value;
   }
@@ -1577,7 +1593,7 @@ function csvValue(value: unknown): string | number | bigint {
 }
 
 function csvCell(value: unknown): string {
-  const text = String(value ?? "");
+  const text = String(value ?? '');
   return /[",\r\n]/u.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }
 
@@ -1586,22 +1602,22 @@ async function ensureOutputLayout(
   create: boolean,
 ): Promise<void> {
   await ensureRealDirectory(destination, create, create);
-  for (const relative of ["runs", "errors", ".batch", ".batch/jobs"]) {
+  for (const relative of ['runs', 'errors', '.batch', '.batch/jobs']) {
     await ensureRealDirectory(join(destination, relative), create, false);
   }
 }
 
 async function ensureStateOutputLayout(state: AgentJobState): Promise<void> {
-  if (typeof state.output_dir !== "string" || state.output_dir.length === 0) {
+  if (typeof state.output_dir !== 'string' || state.output_dir.length === 0) {
     throw new AgentJobsError(
-      "invalid_job",
-      "Agent job output_dir is missing or invalid",
+      'invalid_job',
+      'Agent job output_dir is missing or invalid',
     );
   }
   if (!isAbsolute(state.output_dir)) {
     throw new AgentJobsError(
-      "invalid_job",
-      "Agent job output_dir must be absolute",
+      'invalid_job',
+      'Agent job output_dir must be absolute',
     );
   }
   await ensureOutputLayout(state.output_dir, false);
@@ -1627,13 +1643,13 @@ async function ensureRealDirectory(
     metadata = await lstat(path);
   } catch (error) {
     if (!isMissingFileError(error)) {
-      throw unsafeInspectionError("directory", path, error);
+      throw unsafeInspectionError('directory', path, error);
     }
     if (!create) {
       throw new AgentJobsError(
-        "unsafe_output_path",
+        'unsafe_output_path',
         `Managed output directory is missing: ${path}`,
-        { path, reason: "missing" },
+        { path, reason: 'missing' },
       );
     }
     try {
@@ -1641,7 +1657,7 @@ async function ensureRealDirectory(
     } catch (mkdirError) {
       if (!isAlreadyExistsError(mkdirError)) {
         throw new AgentJobsError(
-          "unsafe_output_path",
+          'unsafe_output_path',
           `Could not create managed output directory: ${path}`,
           { path, reason: errorMessage(mkdirError) },
         );
@@ -1650,16 +1666,18 @@ async function ensureRealDirectory(
     try {
       metadata = await lstat(path);
     } catch (inspectError) {
-      throw unsafeInspectionError("directory", path, inspectError);
+      throw unsafeInspectionError('directory', path, inspectError);
     }
   }
 
   let reason: string | null = null;
-  if (metadata.isSymbolicLink()) reason = "symlink";
-  else if (!metadata.isDirectory()) reason = "not_directory";
+  if (metadata.isSymbolicLink())
+    reason = 'symlink';
+  else if (!metadata.isDirectory())
+    reason = 'not_directory';
   if (reason !== null) {
     throw new AgentJobsError(
-      "unsafe_output_path",
+      'unsafe_output_path',
       `Managed output path must be a real directory: ${path}`,
       { path, reason },
     );
@@ -1673,19 +1691,21 @@ async function ensureRealFile(path: string): Promise<void> {
   } catch (error) {
     if (isMissingFileError(error)) {
       throw new AgentJobsError(
-        "storage_not_found",
+        'storage_not_found',
         `Managed output file does not exist: ${path}`,
         { path },
       );
     }
-    throw unsafeInspectionError("file", path, error);
+    throw unsafeInspectionError('file', path, error);
   }
   let reason: string | null = null;
-  if (metadata.isSymbolicLink()) reason = "symlink";
-  else if (!metadata.isFile()) reason = "not_regular_file";
+  if (metadata.isSymbolicLink())
+    reason = 'symlink';
+  else if (!metadata.isFile())
+    reason = 'not_regular_file';
   if (reason !== null) {
     throw new AgentJobsError(
-      "unsafe_output_path",
+      'unsafe_output_path',
       `Managed output path must be a real file: ${path}`,
       { path, reason },
     );
@@ -1696,8 +1716,9 @@ async function managedFileExists(path: string): Promise<boolean> {
   try {
     await lstat(path);
   } catch (error) {
-    if (isMissingFileError(error)) return false;
-    throw unsafeInspectionError("file", path, error);
+    if (isMissingFileError(error))
+      return false;
+    throw unsafeInspectionError('file', path, error);
   }
   await ensureRealFile(path);
   return true;
@@ -1708,18 +1729,19 @@ async function pathExists(path: string): Promise<boolean> {
     await lstat(path);
     return true;
   } catch (error) {
-    if (isMissingFileError(error)) return false;
-    throw unsafeInspectionError("file", path, error);
+    if (isMissingFileError(error))
+      return false;
+    throw unsafeInspectionError('file', path, error);
   }
 }
 
 function unsafeInspectionError(
-  kind: "directory" | "file",
+  kind: 'directory' | 'file',
   path: string,
   error: unknown,
 ): AgentJobsError {
   return new AgentJobsError(
-    "unsafe_output_path",
+    'unsafe_output_path',
     `Could not inspect managed output ${kind}: ${path}`,
     { path, reason: errorMessage(error) },
   );
@@ -1729,27 +1751,29 @@ function strictJsonProblem(value: unknown): string | null {
   const seen = new Set<object>();
   const visit = (item: unknown, path: string): string | null => {
     if (
-      item === null ||
-      typeof item === "string" ||
-      typeof item === "boolean" ||
-      typeof item === "bigint"
+      item === null
+      || typeof item === 'string'
+      || typeof item === 'boolean'
+      || typeof item === 'bigint'
     ) {
       return null;
     }
-    if (typeof item === "number") {
+    if (typeof item === 'number') {
       return Number.isFinite(item)
         ? null
         : `${path} contains a non-finite number`;
     }
-    if (typeof item !== "object") {
+    if (typeof item !== 'object') {
       return `${path} contains a non-JSON ${typeof item} value`;
     }
-    if (seen.has(item)) return `${path} contains a cyclic value`;
+    if (seen.has(item))
+      return `${path} contains a cyclic value`;
     seen.add(item);
     if (Array.isArray(item)) {
       for (const [index, child] of item.entries()) {
         const problem = visit(child, `${path}/${index}`);
-        if (problem !== null) return problem;
+        if (problem !== null)
+          return problem;
       }
     } else {
       const prototype = Object.getPrototypeOf(item);
@@ -1761,14 +1785,16 @@ function strictJsonProblem(value: unknown): string | null {
       }
       for (const [key, child] of Object.entries(item)) {
         const problem = visit(child, `${path}/${escapePointer(key)}`);
-        if (problem !== null) return problem;
+        if (problem !== null)
+          return problem;
       }
     }
     seen.delete(item);
     return null;
   };
-  const problem = visit(value, "");
-  if (problem !== null) return problem;
+  const problem = visit(value, '');
+  if (problem !== null)
+    return problem;
   try {
     stringifyStrictJson(value);
   } catch (error) {
@@ -1778,11 +1804,12 @@ function strictJsonProblem(value: unknown): string | null {
 }
 
 function absolutePath(input: PathInput): string {
-  if (input instanceof URL) return resolve(fileURLToPath(input));
-  const expanded =
-    input === "~"
+  if (input instanceof URL)
+    return resolve(fileURLToPath(input));
+  const expanded
+    = input === '~'
       ? homedir()
-      : input.startsWith("~/")
+      : input.startsWith('~/')
         ? join(homedir(), input.slice(2))
         : input;
   return resolve(expanded);
@@ -1802,9 +1829,9 @@ async function canonicalPath(input: PathInput): Promise<string> {
       const existing = await realpath(cursor);
       return resolve(existing, ...unresolved.toReversed());
     } catch (error) {
-      if (!isMissingFileError(error) && !hasNodeCode(error, "ENOTDIR")) {
+      if (!isMissingFileError(error) && !hasNodeCode(error, 'ENOTDIR')) {
         throw new AgentJobsError(
-          "unsafe_output_path",
+          'unsafe_output_path',
           `Could not resolve managed output path: ${cursor}`,
           { path: cursor, reason: errorMessage(error) },
         );
@@ -1812,7 +1839,7 @@ async function canonicalPath(input: PathInput): Promise<string> {
       const parent = dirname(cursor);
       if (parent === cursor) {
         throw new AgentJobsError(
-          "unsafe_output_path",
+          'unsafe_output_path',
           `Could not resolve managed output path: ${candidate}`,
           { path: candidate, reason: errorMessage(error) },
         );
@@ -1825,11 +1852,12 @@ async function canonicalPath(input: PathInput): Promise<string> {
 
 /** Make a path absolute without collapsing `..` across a symlink boundary. */
 function unresolvedAbsolutePath(input: PathInput): string {
-  if (input instanceof URL) return fileURLToPath(input);
-  const expanded =
-    input === "~"
+  if (input instanceof URL)
+    return fileURLToPath(input);
+  const expanded
+    = input === '~'
       ? homedir()
-      : input.startsWith("~/")
+      : input.startsWith('~/')
         ? `${homedir()}${sep}${input.slice(2)}`
         : input;
   return isAbsolute(expanded) ? expanded : `${process.cwd()}${sep}${expanded}`;
@@ -1842,28 +1870,28 @@ function now(): string {
 function archiveStamp(date = new Date()): string {
   return date
     .toISOString()
-    .replaceAll("-", "")
-    .replaceAll(":", "");
+    .replaceAll('-', '')
+    .replaceAll(':', '');
 }
 
 function camelToSnake(value: string): string {
-  return value.replace(/[A-Z]/gu, (character) => `_${character.toLowerCase()}`);
+  return value.replace(/[A-Z]/gu, character => `_${character.toLowerCase()}`);
 }
 
 function escapePointer(value: string): string {
-  return value.replaceAll("~", "~0").replaceAll("/", "~1");
+  return value.replaceAll('~', '~0').replaceAll('/', '~1');
 }
 
 function isObject(value: unknown): value is JsonObject {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function isMissingFileError(error: unknown): boolean {
-  return isNodeError(error) && error.code === "ENOENT";
+  return isNodeError(error) && error.code === 'ENOENT';
 }
 
 function isAlreadyExistsError(error: unknown): boolean {
-  return hasNodeCode(error, "EEXIST");
+  return hasNodeCode(error, 'EEXIST');
 }
 
 function hasNodeCode(error: unknown, code: string): boolean {
@@ -1871,7 +1899,7 @@ function hasNodeCode(error: unknown, code: string): boolean {
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
-  return error instanceof Error && "code" in error;
+  return error instanceof Error && 'code' in error;
 }
 
 function errorMessage(error: unknown): string {

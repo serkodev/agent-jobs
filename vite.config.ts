@@ -7,7 +7,7 @@ import packageMetadata from './package.json' with { type: 'json' };
 
 const nodeBuiltins = new Set([
   ...builtinModules,
-  ...builtinModules.map((name) => `node:${name}`),
+  ...builtinModules.map(name => `node:${name}`),
 ]);
 
 export default defineConfig({
@@ -32,7 +32,7 @@ export default defineConfig({
     },
     rolldownOptions: {
       platform: 'node',
-      external: (id) => nodeBuiltins.has(id),
+      external: id => nodeBuiltins.has(id),
       output: {
         codeSplitting: false,
       },

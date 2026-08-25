@@ -1,6 +1,6 @@
 import {
-  mkdtemp,
   mkdir,
+  mkdtemp,
   readFile,
   realpath,
   rm,
@@ -11,17 +11,17 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
-import YAML from 'yaml';
-
 import { AgentJobsRuntime } from '@agent-jobs/runtime';
+import { afterEach, describe, expect, it } from 'vitest';
+
+import YAML from 'yaml';
 
 import { runInstallerCommand } from '../src/installer.js';
 
 const roots: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
 });
 
 function capture(): {
@@ -298,7 +298,7 @@ describe('agent-jobs installer', () => {
       registryDir: join(context.root, 'registry-incomplete'),
     }).doctor();
     const incompleteCheck = (incomplete.checks as Array<Record<string, unknown>>).find(
-      (check) => check.name === 'installation',
+      check => check.name === 'installation',
     );
     expect(incompleteCheck).toMatchObject({
       ok: false,
@@ -318,7 +318,7 @@ describe('agent-jobs installer', () => {
       registryDir: join(context.root, 'registry-complete'),
     }).doctor();
     const completeCheck = (complete.checks as Array<Record<string, unknown>>).find(
-      (check) => check.name === 'installation',
+      check => check.name === 'installation',
     );
     expect(completeCheck).toMatchObject({ ok: true });
   });

@@ -1,5 +1,6 @@
 /** Durable filesystem primitives and strict, bigint-safe JSON helpers. */
-import { randomUUID } from "node:crypto";
+import type { Stats } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import {
   link,
   lstat,
@@ -8,14 +9,15 @@ import {
   readFile,
   rename,
   unlink,
-} from "node:fs/promises";
-import { hostname } from "node:os";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+} from 'node:fs/promises';
+import { hostname } from 'node:os';
+import { dirname, resolve } from 'node:path';
+import process from 'node:process';
+import { fileURLToPath } from 'node:url';
 
-import { JSONParse, JSONStringify } from "json-with-bigint";
+import { JSONParse, JSONStringify } from 'json-with-bigint';
 
-import { AgentJobsError } from "./errors.js";
+import { AgentJobsError } from './errors.js';
 
 export type FilePath = string | URL;
 export interface StrictJsonStringifyOptions {
@@ -64,7 +66,7 @@ export function stringifyStrictJson(
     options.pretty ? 2 : undefined,
   );
   if (rendered === undefined) {
-    throw new TypeError("Value cannot be represented as JSON");
+    throw new TypeError('Value cannot be represented as JSON');
   }
   return rendered;
 }
@@ -73,7 +75,7 @@ export function stringifyStrictJson(
 export async function readUtf8File(path: FilePath): Promise<string> {
   const source = toPath(path);
   const bytes = await readFile(source);
-  return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
 }
 
 /** Run one operation while holding a cross-process exclusive lock. */
@@ -86,8 +88,8 @@ export async function withLock<T>(
   const timeoutMs = options.timeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS;
   if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
     throw new AgentJobsError(
-      "invalid_lock_timeout",
-      "Filesystem lock timeout must be a finite non-negative number",
+      'invalid_lock_timeout',
+      'Filesystem lock timeout must be a finite non-negative number',
       { path, timeout_ms: timeoutMs },
     );
   }
@@ -109,7 +111,7 @@ export async function withLock<T>(
       await release();
     } catch (error) {
       if (operationError === undefined) {
-        throw ioError("lock_error", "Could not release filesystem lock", path, error);
+        throw ioError('lock_error', 'Could not release filesystem lock', path, error);
       }
     }
     if (operationError !== undefined) {
@@ -123,7 +125,7 @@ export async function withLock<T>(
     if (acquired) {
       throw error;
     }
-    throw ioError("lock_error", "Could not acquire filesystem lock", path, error);
+    throw ioError('lock_error', 'Could not acquire filesystem lock', path, error);
   }
 }
 
@@ -134,14 +136,14 @@ export async function readJson(path: FilePath): Promise<unknown> {
   try {
     text = await readUtf8File(source);
   } catch (error) {
-    if (hasCode(error, "ENOENT")) {
+    if (hasCode(error, 'ENOENT')) {
       throw new AgentJobsError(
-        "storage_not_found",
+        'storage_not_found',
         `JSON file does not exist: ${source}`,
         { path: source },
       );
     }
-    throw ioError("storage_error", "Could not read JSON file", source, error);
+    throw ioError('storage_error', 'Could not read JSON file', source, error);
   }
 
   try {
@@ -155,7 +157,7 @@ export async function readJson(path: FilePath): Promise<unknown> {
       details.column = location.column;
     }
     throw new AgentJobsError(
-      "invalid_json",
+      'invalid_json',
       `Invalid JSON in ${source}: ${errorMessage(error)}`,
       details,
     );
@@ -174,7 +176,7 @@ export async function atomicWriteJson(
     text = stringifyStrictJson(data, { pretty: true, sortKeys: true });
   } catch (error) {
     throw new AgentJobsError(
-      "json_not_serializable",
+      'json_not_serializable',
       `Value cannot be encoded as strict JSON: ${errorMessage(error)}`,
       { path: destination },
     );
@@ -195,9 +197,9 @@ export async function atomicWriteText(
     await mkdir(parent, { recursive: true });
     temporary = resolve(parent, `.${fileName(destination)}.${randomUUID()}.tmp`);
 
-    const handle = await open(temporary, "wx", 0o600);
+    const handle = await open(temporary, 'wx', 0o600);
     try {
-      await handle.writeFile(text, { encoding: "utf8" });
+      await handle.writeFile(text, { encoding: 'utf8' });
       await handle.sync();
     } finally {
       await handle.close();
@@ -207,9 +209,9 @@ export async function atomicWriteText(
       try {
         await link(temporary, destination);
       } catch (error) {
-        if (hasCode(error, "EEXIST")) {
+        if (hasCode(error, 'EEXIST')) {
           throw new AgentJobsError(
-            "target_exists",
+            'target_exists',
             `Refusing to overwrite existing file: ${destination}`,
             { path: destination },
           );
@@ -229,8 +231,8 @@ export async function atomicWriteText(
       throw error;
     }
     throw ioError(
-      "storage_error",
-      "Could not atomically write file",
+      'storage_error',
+      'Could not atomically write file',
       destination,
       error,
     );
@@ -256,7 +258,7 @@ export async function atomicMove(
     const info = await lstat(origin);
     if (!info.isFile() || info.isSymbolicLink()) {
       throw new AgentJobsError(
-        "storage_error",
+        'storage_error',
         `Source must be a regular file: ${origin}`,
         { path: target, source: origin },
       );
@@ -270,30 +272,30 @@ export async function atomicMove(
     if (error instanceof AgentJobsError) {
       throw error;
     }
-    if (hasCode(error, "EEXIST")) {
+    if (hasCode(error, 'EEXIST')) {
       throw new AgentJobsError(
-        "target_exists",
+        'target_exists',
         `Refusing to overwrite existing file: ${target}`,
         { path: target },
       );
     }
-    if (hasCode(error, "ENOENT")) {
+    if (hasCode(error, 'ENOENT')) {
       throw new AgentJobsError(
-        "storage_not_found",
+        'storage_not_found',
         `Source file does not exist: ${origin}`,
         { path: origin },
       );
     }
-    if (hasCode(error, "EXDEV")) {
+    if (hasCode(error, 'EXDEV')) {
       throw ioError(
-        "cross_device_move",
-        "Atomic move requires source and destination on the same filesystem",
+        'cross_device_move',
+        'Atomic move requires source and destination on the same filesystem',
         target,
         error,
         origin,
       );
     }
-    throw ioError("storage_error", "Could not atomically move file", target, error, origin);
+    throw ioError('storage_error', 'Could not atomically move file', target, error, origin);
   }
 }
 
@@ -305,10 +307,10 @@ export async function safeUnlink(path: FilePath): Promise<boolean> {
     await fsyncDirectory(dirname(target));
     return true;
   } catch (error) {
-    if (hasCode(error, "ENOENT")) {
+    if (hasCode(error, 'ENOENT')) {
       return false;
     }
-    throw ioError("storage_error", "Could not remove file", target, error);
+    throw ioError('storage_error', 'Could not remove file', target, error);
   }
 }
 
@@ -317,18 +319,18 @@ function toPath(value: FilePath): string {
 }
 
 function fileName(path: string): string {
-  const index = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-  return path.slice(index + 1) || "file";
+  const index = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  return path.slice(index + 1) || 'file';
 }
 
 async function fsyncDirectory(directory: string): Promise<void> {
   let handle;
   try {
-    handle = await open(directory, "r");
+    handle = await open(directory, 'r');
     await handle.sync();
   } catch (error) {
     if (
-      hasAnyCode(error, ["EINVAL", "ENOTSUP", "EBADF", "EACCES", "EPERM"])
+      hasAnyCode(error, ['EINVAL', 'ENOTSUP', 'EBADF', 'EACCES', 'EPERM'])
     ) {
       return;
     }
@@ -339,14 +341,14 @@ async function fsyncDirectory(directory: string): Promise<void> {
 }
 
 function assertFiniteNumbers(value: unknown, seen = new WeakSet<object>()): void {
-  if (typeof value === "number" && !Number.isFinite(value)) {
-    throw new SyntaxError("non-finite JSON number is not allowed");
+  if (typeof value === 'number' && !Number.isFinite(value)) {
+    throw new SyntaxError('non-finite JSON number is not allowed');
   }
-  if (value === null || typeof value !== "object") {
+  if (value === null || typeof value !== 'object') {
     return;
   }
   if (seen.has(value)) {
-    throw new SyntaxError("cyclic JSON value is not allowed");
+    throw new SyntaxError('cyclic JSON value is not allowed');
   }
   seen.add(value);
   if (Array.isArray(value)) {
@@ -359,24 +361,24 @@ function assertFiniteNumbers(value: unknown, seen = new WeakSet<object>()): void
 
 function assertStrictJsonValue(value: unknown, seen = new WeakSet<object>()): void {
   if (
-    value === null ||
-    typeof value === "string" ||
-    typeof value === "boolean" ||
-    typeof value === "bigint"
+    value === null
+    || typeof value === 'string'
+    || typeof value === 'boolean'
+    || typeof value === 'bigint'
   ) {
     return;
   }
-  if (typeof value === "number") {
+  if (typeof value === 'number') {
     if (!Number.isFinite(value)) {
-      throw new TypeError("non-finite numbers are not valid strict JSON");
+      throw new TypeError('non-finite numbers are not valid strict JSON');
     }
     return;
   }
-  if (typeof value !== "object") {
+  if (typeof value !== 'object') {
     throw new TypeError(`unsupported JSON value type: ${typeof value}`);
   }
   if (seen.has(value)) {
-    throw new TypeError("cyclic values are not valid JSON");
+    throw new TypeError('cyclic values are not valid JSON');
   }
   seen.add(value);
   if (Array.isArray(value)) {
@@ -384,7 +386,7 @@ function assertStrictJsonValue(value: unknown, seen = new WeakSet<object>()): vo
   } else {
     const prototype = Object.getPrototypeOf(value);
     if (prototype !== Object.prototype && prototype !== null) {
-      throw new TypeError("only plain objects can be encoded as strict JSON");
+      throw new TypeError('only plain objects can be encoded as strict JSON');
     }
     for (const item of Object.values(value)) assertStrictJsonValue(item, seen);
   }
@@ -395,7 +397,7 @@ function sortObjectKeys(value: unknown): unknown {
   if (Array.isArray(value)) {
     return value.map(sortObjectKeys);
   }
-  if (value !== null && typeof value === "object") {
+  if (value !== null && typeof value === 'object') {
     return Object.fromEntries(
       Object.entries(value)
         .sort(([left], [right]) => compareUnicodeCodePoints(left, right))
@@ -410,25 +412,27 @@ async function ensureLockAnchor(path: string): Promise<void> {
     const info = await lstat(path);
     if (info.isSymbolicLink() || !info.isFile()) {
       throw new AgentJobsError(
-        "lock_error",
+        'lock_error',
         `Filesystem lock path must be a regular file: ${path}`,
         { path },
       );
     }
     return;
   } catch (error) {
-    if (!hasCode(error, "ENOENT")) throw error;
+    if (!hasCode(error, 'ENOENT'))
+      throw error;
   }
 
   try {
-    const handle = await open(path, "wx", 0o600);
+    const handle = await open(path, 'wx', 0o600);
     await handle.close();
   } catch (error) {
-    if (!hasCode(error, "EEXIST")) throw error;
+    if (!hasCode(error, 'EEXIST'))
+      throw error;
     const info = await lstat(path);
     if (info.isSymbolicLink() || !info.isFile()) {
       throw new AgentJobsError(
-        "lock_error",
+        'lock_error',
         `Filesystem lock path must be a regular file: ${path}`,
         { path },
       );
@@ -460,7 +464,7 @@ async function acquireOwnedLock(
     const candidateInfo = await inspectLockFile(candidate);
     if (candidateInfo === null) {
       throw new AgentJobsError(
-        "lock_error",
+        'lock_error',
         `Prepared lock owner disappeared: ${candidate}`,
         { path: candidate },
       );
@@ -479,7 +483,8 @@ async function acquireOwnedLock(
         linked = true;
         await fsyncDirectory(dirname(lockFile));
       } catch (error) {
-        if (!hasCode(error, "EEXIST")) throw error;
+        if (!hasCode(error, 'EEXIST'))
+          throw error;
         if (await recoverAbandonedLock(lockFile, recoveryClaim)) {
           delayMs = 10;
           continue;
@@ -506,7 +511,7 @@ async function acquireOwnedLock(
       const currentOwner = await readLockOwner(lockFile);
       if (currentOwner === null || currentOwner.token !== owner.token) {
         throw new AgentJobsError(
-          "lock_error",
+          'lock_error',
           `Filesystem lock ownership changed during acquisition: ${lockFile}`,
           { path: lockFile },
         );
@@ -555,14 +560,14 @@ async function assertOwnedLock(
   const owner = await readLockOwner(lockFile);
   if (info === null || !sameLockIdentity(info, identity)) {
     throw new AgentJobsError(
-      "lock_error",
+      'lock_error',
       `Filesystem lock identity changed before release: ${lockFile}`,
       { path: lockFile },
     );
   }
   if (owner === null || owner.token !== expected.token || owner.pid !== expected.pid) {
     throw new AgentJobsError(
-      "lock_error",
+      'lock_error',
       `Filesystem lock ownership changed before release: ${lockFile}`,
       { path: lockFile },
     );
@@ -574,12 +579,15 @@ async function recoverAbandonedLock(
   recoveryClaim: string,
 ): Promise<boolean> {
   const info = await inspectLockFile(lockFile);
-  if (info === null) return true;
+  if (info === null)
+    return true;
   const identity = lockIdentity(info);
   const owner = await readLockOwner(lockFile);
   if (owner !== null) {
-    if (owner.hostname !== hostname()) return false;
-    if (pidIsAlive(owner.pid)) return false;
+    if (owner.hostname !== hostname())
+      return false;
+    if (pidIsAlive(owner.pid))
+      return false;
   }
 
   const claimant: LockOwner = {
@@ -591,7 +599,7 @@ async function recoverAbandonedLock(
   try {
     await atomicWriteJson(recoveryClaim, claimant, { noClobber: true });
   } catch (error) {
-    if (error instanceof AgentJobsError && error.code === "target_exists") {
+    if (error instanceof AgentJobsError && error.code === 'target_exists') {
       return false;
     }
     throw error;
@@ -600,7 +608,7 @@ async function recoverAbandonedLock(
   const claimInfo = await inspectLockFile(recoveryClaim);
   if (claimInfo === null) {
     throw new AgentJobsError(
-      "lock_error",
+      'lock_error',
       `Recovery claim disappeared after creation: ${recoveryClaim}`,
       { path: recoveryClaim },
     );
@@ -608,11 +616,14 @@ async function recoverAbandonedLock(
   const claimIdentity = lockIdentity(claimInfo);
   try {
     const currentInfo = await inspectLockFile(lockFile);
-    if (currentInfo === null) return true;
-    if (!sameLockIdentity(currentInfo, identity)) return false;
+    if (currentInfo === null)
+      return true;
+    if (!sameLockIdentity(currentInfo, identity))
+      return false;
     const currentOwner = await readLockOwner(lockFile);
     if (currentOwner !== null) {
-      if (owner === null || currentOwner.token !== owner.token) return false;
+      if (owner === null || currentOwner.token !== owner.token)
+        return false;
       if (currentOwner.hostname !== hostname() || pidIsAlive(currentOwner.pid)) {
         return false;
       }
@@ -633,19 +644,20 @@ async function recoveryClaimBlocks(path: string): Promise<boolean> {
   return (await inspectLockFile(path)) !== null;
 }
 
-async function inspectLockFile(path: string) {
+async function inspectLockFile(path: string): Promise<Stats | null> {
   try {
     const info = await lstat(path);
     if (info.isSymbolicLink() || !info.isFile()) {
       throw new AgentJobsError(
-        "lock_error",
+        'lock_error',
         `Filesystem lock must be a regular file: ${path}`,
         { path },
       );
     }
     return info;
   } catch (error) {
-    if (hasCode(error, "ENOENT")) return null;
+    if (hasCode(error, 'ENOENT'))
+      return null;
     throw error;
   }
 }
@@ -655,12 +667,13 @@ async function readLockOwner(path: string): Promise<LockOwner | null> {
   try {
     info = await lstat(path);
   } catch (error) {
-    if (hasCode(error, "ENOENT")) return null;
+    if (hasCode(error, 'ENOENT'))
+      return null;
     throw error;
   }
   if (info.isSymbolicLink() || !info.isFile()) {
     throw new AgentJobsError(
-      "lock_error",
+      'lock_error',
       `Filesystem lock owner must be a regular file: ${path}`,
       { path },
     );
@@ -668,7 +681,8 @@ async function readLockOwner(path: string): Promise<LockOwner | null> {
   try {
     return parseLockOwner(await readJson(path));
   } catch (error) {
-    if (error instanceof AgentJobsError && error.code === "invalid_json") return null;
+    if (error instanceof AgentJobsError && error.code === 'invalid_json')
+      return null;
     throw error;
   }
 }
@@ -685,18 +699,19 @@ function sameLockIdentity(
 }
 
 function parseLockOwner(value: unknown): LockOwner | null {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  if (value === null || typeof value !== 'object' || Array.isArray(value))
+    return null;
   const record = value as Record<string, unknown>;
   if (
-    typeof record.pid !== "number" ||
-    !Number.isSafeInteger(record.pid) ||
-    record.pid <= 0 ||
-    typeof record.hostname !== "string" ||
-    record.hostname.length === 0 ||
-    typeof record.token !== "string" ||
-    record.token.length === 0 ||
-    typeof record.created_at !== "number" ||
-    !Number.isFinite(record.created_at)
+    typeof record.pid !== 'number'
+    || !Number.isSafeInteger(record.pid)
+    || record.pid <= 0
+    || typeof record.hostname !== 'string'
+    || record.hostname.length === 0
+    || typeof record.token !== 'string'
+    || record.token.length === 0
+    || typeof record.created_at !== 'number'
+    || !Number.isFinite(record.created_at)
   ) {
     return null;
   }
@@ -713,15 +728,17 @@ function pidIsAlive(pid: number): boolean {
     process.kill(pid, 0);
     return true;
   } catch (error) {
-    if (hasCode(error, "ESRCH")) return false;
-    if (hasCode(error, "EPERM")) return true;
+    if (hasCode(error, 'ESRCH'))
+      return false;
+    if (hasCode(error, 'EPERM'))
+      return true;
     throw error;
   }
 }
 
 async function pollingDelay(delayMs: number): Promise<void> {
   const randomized = Math.max(1, Math.round(delayMs * (0.75 + Math.random() * 0.5)));
-  await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, randomized));
+  await new Promise<void>(resolveDelay => setTimeout(resolveDelay, randomized));
 }
 
 async function waitForLockRetry(
@@ -753,7 +770,8 @@ async function lockTimeoutError(
   };
   try {
     const owner = await readLockOwner(lockFile);
-    if (owner !== null) details.owner = owner;
+    if (owner !== null)
+      details.owner = owner;
   } catch (error) {
     details.owner_error = errorMessage(error);
   }
@@ -768,19 +786,20 @@ async function lockTimeoutError(
     details.recovery_claim_error = errorMessage(error);
   }
   return new AgentJobsError(
-    "lock_timeout",
+    'lock_timeout',
     `Timed out after ${waitedMs}ms waiting for filesystem lock: ${lockFile}`,
     details,
   );
 }
 
 function compareUnicodeCodePoints(left: string, right: string): number {
-  const leftPoints = Array.from(left, (character) => character.codePointAt(0) ?? 0);
-  const rightPoints = Array.from(right, (character) => character.codePointAt(0) ?? 0);
+  const leftPoints = Array.from(left, character => character.codePointAt(0) ?? 0);
+  const rightPoints = Array.from(right, character => character.codePointAt(0) ?? 0);
   const length = Math.min(leftPoints.length, rightPoints.length);
   for (let index = 0; index < length; index += 1) {
     const difference = (leftPoints[index] ?? 0) - (rightPoints[index] ?? 0);
-    if (difference !== 0) return difference;
+    if (difference !== 0)
+      return difference;
   }
   return leftPoints.length - rightPoints.length;
 }
@@ -796,7 +815,8 @@ function ioError(
     path,
     reason: errorMessage(error),
   };
-  if (source !== undefined) details.source = source;
+  if (source !== undefined)
+    details.source = source;
   if (isErrnoException(error) && error.errno !== undefined) {
     details.errno = error.errno;
   }
@@ -804,7 +824,7 @@ function ioError(
 }
 
 function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
-  return error instanceof Error && "code" in error;
+  return error instanceof Error && 'code' in error;
 }
 
 function hasCode(error: unknown, code: string): boolean {
@@ -812,7 +832,7 @@ function hasCode(error: unknown, code: string): boolean {
 }
 
 function hasAnyCode(error: unknown, codes: readonly string[]): boolean {
-  return isErrnoException(error) && codes.includes(error.code ?? "");
+  return isErrnoException(error) && codes.includes(error.code ?? '');
 }
 
 function errorMessage(error: unknown): string {
@@ -826,7 +846,7 @@ function jsonErrorPosition(error: unknown): number | undefined {
 
 function lineAndColumn(text: string, position: number): { line: number; column: number } {
   const prefix = text.slice(0, position);
-  const lines = prefix.split("\n");
+  const lines = prefix.split('\n');
   return { line: lines.length, column: (lines.at(-1)?.length ?? 0) + 1 };
 }
 
@@ -843,13 +863,14 @@ function assertNoLossyIntegerLikeNumbers(text: string): void {
       index = skipJsonString(text, index);
       continue;
     }
-    if (character === "-" || (character !== undefined && /[0-9]/.test(character))) {
-      const match = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/.exec(
+    if (character === '-' || (character !== undefined && /\d/.test(character))) {
+      const match = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:e[+-]?\d+)?/i.exec(
         text.slice(index),
       );
       if (match) {
         const token = match[0];
-        if (/[.eE]/.test(token)) assertLosslessDecimalToken(token);
+        if (/[.e]/i.test(token))
+          assertLosslessDecimalToken(token);
         index += token.length;
         continue;
       }
@@ -861,11 +882,12 @@ function assertNoLossyIntegerLikeNumbers(text: string): void {
 function skipJsonString(text: string, openingQuote: number): number {
   let index = openingQuote + 1;
   while (index < text.length) {
-    if (text[index] === "\\") {
+    if (text[index] === '\\') {
       index += 2;
       continue;
     }
-    if (text[index] === '"') return index + 1;
+    if (text[index] === '"')
+      return index + 1;
     index += 1;
   }
   return index;
@@ -883,8 +905,8 @@ function assertLosslessDecimalToken(token: string): void {
   if (exactInteger) {
     const integer = exact.numerator / exact.denominator;
     if (
-      integer < BigInt(Number.MIN_SAFE_INTEGER) ||
-      integer > BigInt(Number.MAX_SAFE_INTEGER)
+      integer < BigInt(Number.MIN_SAFE_INTEGER)
+      || integer > BigInt(Number.MAX_SAFE_INTEGER)
     ) {
       throw new SyntaxError(`JSON integer cannot be represented losslessly: ${token}`);
     }
@@ -898,17 +920,19 @@ function assertLosslessDecimalToken(token: string): void {
 }
 
 function decimalRational(token: string): { numerator: bigint; denominator: bigint } {
-  const match = /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(token);
-  if (!match) throw new SyntaxError(`Invalid JSON number: ${token}`);
-  const fraction = match[3] ?? "";
-  const exponentText = match[4] ?? "0";
+  const match = /^(-?)(\d+)(?:\.(\d+))?(?:e([+-]?\d+))?$/i.exec(token);
+  if (!match)
+    throw new SyntaxError(`Invalid JSON number: ${token}`);
+  const fraction = match[3] ?? '';
+  const exponentText = match[4] ?? '0';
   const exponent = Number(exponentText);
   if (!Number.isSafeInteger(exponent) || Math.abs(exponent) > 100_000) {
     throw new SyntaxError(`JSON number exponent is too large: ${token}`);
   }
   const digits = `${match[2]}${fraction}`;
-  let numerator = BigInt(digits || "0");
-  if (match[1] === "-") numerator = -numerator;
+  let numerator = BigInt(digits || '0');
+  if (match[1] === '-')
+    numerator = -numerator;
   const scale = fraction.length - exponent;
   if (scale <= 0) {
     return { numerator: numerator * 10n ** BigInt(-scale), denominator: 1n };

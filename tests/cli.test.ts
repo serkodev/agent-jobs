@@ -1,8 +1,9 @@
+import type { AgentJobsRuntime } from '@agent-jobs/runtime';
+
 import { EventEmitter } from 'node:events';
+import { AgentJobsError } from '@agent-jobs/runtime';
 
 import { describe, expect, it, vi } from 'vitest';
-
-import { AgentJobsError, type AgentJobsRuntime } from '@agent-jobs/runtime';
 
 import { runCli, runProcessCli } from '../src/cli.js';
 

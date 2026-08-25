@@ -1,23 +1,25 @@
 {
   "name": "agent-jobs",
+  "type": "module",
   "version": "0.3.0",
   "private": true,
-  "type": "module",
+  "packageManager": "pnpm@11.19.0",
   "description": "Run resumable, schema-validated agent jobs with native Codex and Claude workers",
   "bin": {
     "agent-jobs": "dist/agent-jobs.mjs"
   },
   "files": [
-    "dist/agent-jobs.mjs",
-    "README.md"
+    "README.md",
+    "dist/agent-jobs.mjs"
   ],
   "engines": {
     "node": ">=20.6"
   },
-  "packageManager": "pnpm@11.19.0",
   "scripts": {
     "agent-jobs": "node dist/agent-jobs.mjs",
     "build": "pnpm typecheck && vite build",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
     "prepack": "pnpm build",
     "test:bundle": "pnpm build && node scripts/verify-bundle.mjs",
     "typecheck": "pnpm --filter @agent-jobs/runtime typecheck && tsc --noEmit",
@@ -26,9 +28,12 @@
   },
   "devDependencies": {
     "@agent-jobs/runtime": "workspace:*",
+    "@antfu/eslint-config": "^9.3.0",
     "@modelcontextprotocol/client": "^2.0.0",
     "@types/node": "^24.10.0",
-    "typescript": "^7.0.2",
+    "@typescript/native": "npm:typescript@^7.0.2",
+    "eslint": "^10.9.1",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
     "vite": "8.2.1",
     "vitest": "^4.1.10",
     "yaml": "^2.8.1"

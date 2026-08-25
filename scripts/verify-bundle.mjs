@@ -1,16 +1,18 @@
 import assert from 'node:assert/strict';
+import { Buffer } from 'node:buffer';
 import { execFile } from 'node:child_process';
 import {
   chmod,
   copyFile,
   mkdtemp,
-  readFile,
   readdir,
+  readFile,
   rm,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import process from 'node:process';
 import { promisify } from 'node:util';
 
 import { Client } from '@modelcontextprotocol/client';
@@ -130,7 +132,7 @@ Return one summary string.
     await client.connect(transport);
     const tools = await client.listTools();
     assert.deepEqual(
-      tools.tools.map((tool) => tool.name),
+      tools.tools.map(tool => tool.name),
       expectedTools,
     );
     for (const lease of leases.assignments) {
@@ -138,7 +140,7 @@ Return one summary string.
         name: 'get_assignment',
         arguments: { handle: lease.handle },
       });
-      const content = assignment.content.find((item) => item.type === 'text');
+      const content = assignment.content.find(item => item.type === 'text');
       assert.ok(content && content.type === 'text');
       const row = JSON.parse(content.text);
       const submitted = await client.callTool({

@@ -1,15 +1,17 @@
+import type { ErrorObject, ValidateFunction } from 'ajv/dist/2020.js';
+import type { FilePath } from './storage.js';
 /** Markdown task-spec parsing and deterministic JSON Schema 2020-12 validation. */
-import { stat } from "node:fs/promises";
-import { homedir } from "node:os";
-import { resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { stat } from 'node:fs/promises';
+import { homedir } from 'node:os';
 
-import { Ajv2020, type ErrorObject, type ValidateFunction } from "ajv/dist/2020.js";
-import formatsPlugin from "ajv-formats";
-import { parseDocument } from "yaml";
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import formatsPlugin from 'ajv-formats';
+import { Ajv2020 } from 'ajv/dist/2020.js';
 
-import { AgentJobsError } from "./errors.js";
-import { readUtf8File, stringifyStrictJson, type FilePath } from "./storage.js";
+import { parseDocument } from 'yaml';
+import { AgentJobsError } from './errors.js';
+import { readUtf8File, stringifyStrictJson } from './storage.js';
 
 export type JsonSchema = Record<string, unknown>;
 
@@ -17,38 +19,38 @@ const MIN_SAFE_BIGINT = BigInt(Number.MIN_SAFE_INTEGER);
 const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
 
 const EXACT_KEYWORDS = {
-  const: "xBatchExactConst",
-  enum: "xBatchExactEnum",
-  exclusiveMaximum: "xBatchExactExclusiveMaximum",
-  exclusiveMinimum: "xBatchExactExclusiveMinimum",
-  maximum: "xBatchExactMaximum",
-  minimum: "xBatchExactMinimum",
-  multipleOf: "xBatchExactMultipleOf",
-  uniqueItems: "xBatchExactUniqueItems",
+  const: 'xBatchExactConst',
+  enum: 'xBatchExactEnum',
+  exclusiveMaximum: 'xBatchExactExclusiveMaximum',
+  exclusiveMinimum: 'xBatchExactExclusiveMinimum',
+  maximum: 'xBatchExactMaximum',
+  minimum: 'xBatchExactMinimum',
+  multipleOf: 'xBatchExactMultipleOf',
+  uniqueItems: 'xBatchExactUniqueItems',
 } as const;
 
 const EXACT_KEYWORD_NAMES: ReadonlySet<string> = new Set(Object.values(EXACT_KEYWORDS));
 const SINGLE_SUBSCHEMA_KEYS = new Set([
-  "additionalItems",
-  "additionalProperties",
-  "contains",
-  "contentSchema",
-  "else",
-  "if",
-  "items",
-  "not",
-  "propertyNames",
-  "then",
-  "unevaluatedItems",
-  "unevaluatedProperties",
+  'additionalItems',
+  'additionalProperties',
+  'contains',
+  'contentSchema',
+  'else',
+  'if',
+  'items',
+  'not',
+  'propertyNames',
+  'then',
+  'unevaluatedItems',
+  'unevaluatedProperties',
 ]);
-const ARRAY_SUBSCHEMA_KEYS = new Set(["allOf", "anyOf", "oneOf", "prefixItems"]);
+const ARRAY_SUBSCHEMA_KEYS = new Set(['allOf', 'anyOf', 'oneOf', 'prefixItems']);
 const MAP_SUBSCHEMA_KEYS = new Set([
-  "$defs",
-  "definitions",
-  "dependentSchemas",
-  "patternProperties",
-  "properties",
+  '$defs',
+  'definitions',
+  'dependentSchemas',
+  'patternProperties',
+  'properties',
 ]);
 
 interface Rational {
@@ -112,7 +114,8 @@ export class TaskSpec {
       instructions: this.instructions,
       output_schema: this.outputSchema,
     };
-    if (this.description) result.description = this.description;
+    if (this.description)
+      result.description = this.description;
     return result;
   }
 }
@@ -122,10 +125,11 @@ export async function loadSpec(path: FilePath): Promise<TaskSpec> {
   const source = resolveSpecPath(path);
   try {
     const info = await stat(source);
-    if (!info.isFile()) throw new Error("not a regular file");
+    if (!info.isFile())
+      throw new Error('not a regular file');
   } catch {
     throw new AgentJobsError(
-      "spec_not_found",
+      'spec_not_found',
       `Task spec does not exist: ${source}`,
       { path: source },
     );
@@ -136,34 +140,34 @@ export async function loadSpec(path: FilePath): Promise<TaskSpec> {
     text = await readUtf8File(source);
   } catch (error) {
     throw new AgentJobsError(
-      "invalid_spec",
+      'invalid_spec',
       `Could not read task spec: ${errorMessage(error)}`,
     );
   }
   const { metadata, instructions } = parseFrontmatter(text);
 
-  const missing = ["name", "input_schema", "output_schema"].filter(
-    (key) => !Object.prototype.hasOwnProperty.call(metadata, key),
+  const missing = ['name', 'input_schema', 'output_schema'].filter(
+    key => !Object.hasOwn(metadata, key),
   );
   if (missing.length > 0) {
     throw new AgentJobsError(
-      "invalid_spec",
-      "Task spec frontmatter is missing required keys",
+      'invalid_spec',
+      'Task spec frontmatter is missing required keys',
       { missing },
     );
   }
 
   const name = metadata.name;
-  if (typeof name !== "string" || name.trim().length === 0) {
+  if (typeof name !== 'string' || name.trim().length === 0) {
     throw new AgentJobsError(
-      "invalid_spec",
-      "Task spec name must be a non-empty string",
+      'invalid_spec',
+      'Task spec name must be a non-empty string',
     );
   }
   if (instructions.trim().length === 0) {
     throw new AgentJobsError(
-      "invalid_spec",
-      "Task spec Markdown instructions must not be empty",
+      'invalid_spec',
+      'Task spec Markdown instructions must not be empty',
     );
   }
 
@@ -171,22 +175,22 @@ export async function loadSpec(path: FilePath): Promise<TaskSpec> {
   const outputSchema = metadata.output_schema;
   if (!isRecord(inputSchema) || !isRecord(outputSchema)) {
     throw new AgentJobsError(
-      "invalid_spec",
-      "input_schema and output_schema must be objects",
+      'invalid_spec',
+      'input_schema and output_schema must be objects',
     );
   }
-  checkSchema(inputSchema, "input_schema");
-  checkSchema(outputSchema, "output_schema");
-  if (inputSchema.type !== "object" || outputSchema.type !== "object") {
+  checkSchema(inputSchema, 'input_schema');
+  checkSchema(outputSchema, 'output_schema');
+  if (inputSchema.type !== 'object' || outputSchema.type !== 'object') {
     throw new AgentJobsError(
-      "invalid_spec",
-      "v1 input_schema and output_schema must have type: object",
+      'invalid_spec',
+      'v1 input_schema and output_schema must have type: object',
     );
   }
   if (!isRecord(inputSchema.properties)) {
     throw new AgentJobsError(
-      "invalid_spec",
-      "input_schema.properties must be an object for field projection",
+      'invalid_spec',
+      'input_schema.properties must be an object for field projection',
     );
   }
 
@@ -194,54 +198,51 @@ export async function loadSpec(path: FilePath): Promise<TaskSpec> {
   if (metadata.defaults !== undefined && metadata.defaults !== null) {
     if (!isRecord(metadata.defaults)) {
       throw new AgentJobsError(
-        "invalid_spec",
-        "defaults must be an object when provided",
+        'invalid_spec',
+        'defaults must be an object when provided',
       );
     }
     defaults = metadata.defaults;
   }
-  const model = Object.prototype.hasOwnProperty.call(metadata, "model")
+  const model = Object.hasOwn(metadata, 'model')
     ? metadata.model
     : (defaults.model ?? null);
-  const reasoningEffort = Object.prototype.hasOwnProperty.call(
-    metadata,
-    "reasoning_effort",
-  )
+  const reasoningEffort = Object.hasOwn(metadata, 'reasoning_effort')
     ? metadata.reasoning_effort
     : (defaults.reasoning_effort ?? null);
   for (const [key, value] of [
-    ["model", model],
-    ["reasoning_effort", reasoningEffort],
+    ['model', model],
+    ['reasoning_effort', reasoningEffort],
   ] as const) {
-    if (value !== null && (typeof value !== "string" || value.trim().length === 0)) {
+    if (value !== null && (typeof value !== 'string' || value.trim().length === 0)) {
       throw new AgentJobsError(
-        "invalid_spec",
+        'invalid_spec',
         `${key} must be a non-empty string`,
       );
     }
   }
-  const selectedModel = typeof model === "string" ? model : null;
-  const selectedReasoningEffort =
-    typeof reasoningEffort === "string" ? reasoningEffort : null;
+  const selectedModel = typeof model === 'string' ? model : null;
+  const selectedReasoningEffort
+    = typeof reasoningEffort === 'string' ? reasoningEffort : null;
 
-  const version = Object.prototype.hasOwnProperty.call(metadata, "version")
+  const version = Object.hasOwn(metadata, 'version')
     ? metadata.version
     : 1;
   if (
-    typeof version === "boolean" ||
-    !["string", "number", "bigint"].includes(typeof version) ||
-    (typeof version === "number" && !Number.isFinite(version))
+    typeof version === 'boolean'
+    || !['string', 'number', 'bigint'].includes(typeof version)
+    || (typeof version === 'number' && !Number.isFinite(version))
   ) {
     throw new AgentJobsError(
-      "invalid_spec",
-      "Task spec version must be a string or number",
+      'invalid_spec',
+      'Task spec version must be a string or number',
     );
   }
   const description = metadata.description ?? null;
-  if (description !== null && typeof description !== "string") {
+  if (description !== null && typeof description !== 'string') {
     throw new AgentJobsError(
-      "invalid_spec",
-      "Task spec description must be a string",
+      'invalid_spec',
+      'Task spec description must be a string',
     );
   }
 
@@ -272,7 +273,8 @@ export function validationErrors(
       normalizedRoot: normalizedInstance,
     }).compile(transformedSchema);
   } catch (error) {
-    if (error instanceof AgentJobsError) throw error;
+    if (error instanceof AgentJobsError)
+      throw error;
     throw schemaReferenceError(error);
   }
 
@@ -280,17 +282,19 @@ export function validationErrors(
   try {
     valid = validator(normalizedInstance) as boolean;
   } catch (error) {
-    if (error instanceof AgentJobsError) throw error;
+    if (error instanceof AgentJobsError)
+      throw error;
     throw schemaReferenceError(error);
   }
-  if (valid) return [];
+  if (valid)
+    return [];
 
   return (validator.errors ?? [])
     .map(toDiagnostic)
     .sort((left, right) =>
       left.path === right.path
-        ? left.validator.localeCompare(right.validator, "en")
-        : left.path.localeCompare(right.path, "en"),
+        ? left.validator.localeCompare(right.validator, 'en')
+        : left.path.localeCompare(right.path, 'en'),
     );
 }
 
@@ -299,50 +303,50 @@ function parseFrontmatter(text: string): {
   instructions: string;
 } {
   const lines = text.split(/\r\n|\n|\r/);
-  if (lines.length === 0 || lines[0]?.trim() !== "---") {
+  if (lines.length === 0 || lines[0]?.trim() !== '---') {
     throw new AgentJobsError(
-      "invalid_spec",
-      "Runnable task specs must begin with YAML frontmatter",
+      'invalid_spec',
+      'Runnable task specs must begin with YAML frontmatter',
     );
   }
-  const closing = lines.findIndex((line, index) => index > 0 && line.trim() === "---");
+  const closing = lines.findIndex((line, index) => index > 0 && line.trim() === '---');
   if (closing < 0) {
     throw new AgentJobsError(
-      "invalid_spec",
-      "Task spec YAML frontmatter is not closed",
+      'invalid_spec',
+      'Task spec YAML frontmatter is not closed',
     );
   }
 
   let metadata: unknown;
   try {
-    const document = parseDocument(lines.slice(1, closing).join("\n"), {
+    const document = parseDocument(lines.slice(1, closing).join('\n'), {
       intAsBigInt: true,
       prettyErrors: true,
-      schema: "core",
+      schema: 'core',
       strict: true,
       stringKeys: true,
       uniqueKeys: true,
     });
     if (document.errors.length > 0) {
-      throw new Error(document.errors.map((error) => error.message).join("; "));
+      throw new Error(document.errors.map(error => error.message).join('; '));
     }
     const raw: unknown = document.toJS({ mapAsMap: true, maxAliasCount: 100 });
     metadata = normalizeYamlObject(raw);
   } catch (error) {
     throw new AgentJobsError(
-      "invalid_spec",
+      'invalid_spec',
       `Invalid YAML frontmatter: ${errorMessage(error)}`,
     );
   }
   if (!isRecord(metadata)) {
     throw new AgentJobsError(
-      "invalid_spec",
-      "Task spec frontmatter must be an object",
+      'invalid_spec',
+      'Task spec frontmatter must be an object',
     );
   }
   return {
     metadata,
-    instructions: lines.slice(closing + 1).join("\n"),
+    instructions: lines.slice(closing + 1).join('\n'),
   };
 }
 
@@ -351,7 +355,7 @@ function checkSchema(schema: JsonSchema, name: string): void {
     stringifyStrictJson(schema);
   } catch (error) {
     throw new AgentJobsError(
-      "invalid_spec",
+      'invalid_spec',
       `${name} must contain only JSON-compatible values: ${errorMessage(error)}`,
     );
   }
@@ -363,23 +367,24 @@ function checkSchema(schema: JsonSchema, name: string): void {
     schemaValid = ajv.validateSchema(metadataSchema) as boolean;
   } catch (error) {
     throw new AgentJobsError(
-      "invalid_spec",
+      'invalid_spec',
       `${name} is not a valid JSON Schema: ${errorMessage(error)}`,
     );
   }
   if (!schemaValid) {
     throw new AgentJobsError(
-      "invalid_spec",
-      `${name} is not a valid JSON Schema: ${ajv.errorsText(ajv.errors, { separator: "; " })}`,
+      'invalid_spec',
+      `${name} is not a valid JSON Schema: ${ajv.errorsText(ajv.errors, { separator: '; ' })}`,
     );
   }
 
   try {
     ajv.compile(transformSchemaForExactNumbers(schema) as JsonSchema);
   } catch (error) {
-    if (error instanceof AgentJobsError) throw error;
+    if (error instanceof AgentJobsError)
+      throw error;
     throw new AgentJobsError(
-      "invalid_schema_reference",
+      'invalid_schema_reference',
       `${name} contains a non-local or unresolved $ref`,
       {
         schema: name,
@@ -410,25 +415,25 @@ function toDiagnostic(error: ErrorObject): ValidationDiagnostic {
   )?.[0];
   return {
     path: error.instancePath,
-    message: error.message ?? "schema validation failed",
+    message: error.message ?? 'schema validation failed',
     validator: originalKeyword ?? error.keyword,
   };
 }
 
 function schemaReferenceError(error: unknown): AgentJobsError {
   return new AgentJobsError(
-    "invalid_schema_reference",
-    "JSON Schema contains an unresolved or cyclic reference",
+    'invalid_schema_reference',
+    'JSON Schema contains an unresolved or cyclic reference',
     { reason: errorMessage(error) },
   );
 }
 
 function missingReference(error: unknown): string | undefined {
-  if (error !== null && typeof error === "object") {
-    if ("missingRef" in error && typeof error.missingRef === "string") {
+  if (error !== null && typeof error === 'object') {
+    if ('missingRef' in error && typeof error.missingRef === 'string') {
       return error.missingRef;
     }
-    if ("missingSchema" in error && typeof error.missingSchema === "string") {
+    if ('missingSchema' in error && typeof error.missingSchema === 'string') {
       return error.missingSchema;
     }
   }
@@ -439,21 +444,25 @@ function normalizeInstanceForAjv(
   value: unknown,
   seen = new WeakMap<object, unknown>(),
 ): unknown {
-  if (typeof value === "bigint") return 0;
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) return value;
+  if (typeof value === 'bigint')
+    return 0;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value))
+      return value;
     if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
       throw new AgentJobsError(
-        "inexact_number",
-        "Unsafe JavaScript integer cannot be schema-validated exactly; use bigint",
+        'inexact_number',
+        'Unsafe JavaScript integer cannot be schema-validated exactly; use bigint',
         { value: value.toString() },
       );
     }
     return value;
   }
-  if (value === null || typeof value !== "object") return value;
+  if (value === null || typeof value !== 'object')
+    return value;
   const previous = seen.get(value);
-  if (previous !== undefined) return previous;
+  if (previous !== undefined)
+    return previous;
   if (Array.isArray(value)) {
     const array: unknown[] = [];
     seen.set(value, array);
@@ -478,18 +487,21 @@ function normalizeSchemaForMeta(
   schema: unknown,
   seen = new WeakMap<object, unknown>(),
 ): unknown {
-  if (typeof schema === "boolean") return schema;
-  if (!isRecord(schema)) return normalizeSchemaLiteralForMeta(schema);
+  if (typeof schema === 'boolean')
+    return schema;
+  if (!isRecord(schema))
+    return normalizeSchemaLiteralForMeta(schema);
   const previous = seen.get(schema);
-  if (previous !== undefined) return previous;
+  if (previous !== undefined)
+    return previous;
   const object = safeObjectEntries([]);
   seen.set(schema, object);
   for (const [key, value] of Object.entries(schema)) {
-    if (key === "const") {
+    if (key === 'const') {
       defineSafe(object, key, null);
       continue;
     }
-    if (key === "enum" && Array.isArray(value)) {
+    if (key === 'enum' && Array.isArray(value)) {
       defineSafe(
         object,
         key,
@@ -501,7 +513,7 @@ function normalizeSchemaForMeta(
       defineSafe(
         object,
         key,
-        typeof value === "boolean" || isRecord(value)
+        typeof value === 'boolean' || isRecord(value)
           ? normalizeSchemaForMeta(value, seen)
           : normalizeSchemaLiteralForMeta(value),
       );
@@ -511,7 +523,7 @@ function normalizeSchemaForMeta(
       defineSafe(
         object,
         key,
-        value.map((item) => normalizeSchemaForMeta(item, seen)),
+        value.map(item => normalizeSchemaForMeta(item, seen)),
       );
       continue;
     }
@@ -528,7 +540,7 @@ function normalizeSchemaForMeta(
       );
       continue;
     }
-    if (key === "dependencies" && isRecord(value)) {
+    if (key === 'dependencies' && isRecord(value)) {
       defineSafe(
         object,
         key,
@@ -552,24 +564,27 @@ function normalizeSchemaLiteralForMeta(
   value: unknown,
   seen = new WeakMap<object, unknown>(),
 ): unknown {
-  if (typeof value === "bigint") {
+  if (typeof value === 'bigint') {
     const numeric = Number(value);
-    if (Number.isFinite(numeric)) return numeric;
+    if (Number.isFinite(numeric))
+      return numeric;
     return value < 0n ? -Number.MAX_SAFE_INTEGER : Number.MAX_SAFE_INTEGER;
   }
-  if (typeof value === "number") {
+  if (typeof value === 'number') {
     if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
       throw new AgentJobsError(
-        "inexact_numeric_schema",
-        "Unsafe JavaScript integer in JSON Schema is ambiguous; use bigint",
+        'inexact_numeric_schema',
+        'Unsafe JavaScript integer in JSON Schema is ambiguous; use bigint',
         { value: value.toString() },
       );
     }
     return value;
   }
-  if (value === null || typeof value !== "object") return value;
+  if (value === null || typeof value !== 'object')
+    return value;
   const previous = seen.get(value);
-  if (previous !== undefined) return previous;
+  if (previous !== undefined)
+    return previous;
   if (Array.isArray(value)) {
     const array: unknown[] = [];
     seen.set(value, array);
@@ -588,31 +603,35 @@ function transformSchemaForExactNumbers(
   schema: unknown,
   seen = new WeakMap<object, unknown>(),
 ): unknown {
-  if (typeof schema === "boolean") return schema;
-  if (!isRecord(schema)) return schema;
+  if (typeof schema === 'boolean')
+    return schema;
+  if (!isRecord(schema))
+    return schema;
   const previous = seen.get(schema);
-  if (previous !== undefined) return previous;
+  if (previous !== undefined)
+    return previous;
   const transformed = safeObjectEntries([]);
   seen.set(schema, transformed);
 
   for (const [key, value] of Object.entries(schema)) {
     if (EXACT_KEYWORD_NAMES.has(key)) {
       throw new AgentJobsError(
-        "invalid_spec",
+        'invalid_spec',
         `JSON Schema uses reserved internal keyword: ${key}`,
       );
     }
     if (key in EXACT_KEYWORDS) {
       const replacement = EXACT_KEYWORDS[key as keyof typeof EXACT_KEYWORDS];
       const encoded = encodeExactKeyword(key, value);
-      if (encoded !== undefined) defineSafe(transformed, replacement, encoded);
+      if (encoded !== undefined)
+        defineSafe(transformed, replacement, encoded);
       continue;
     }
     if (SINGLE_SUBSCHEMA_KEYS.has(key)) {
       defineSafe(
         transformed,
         key,
-        typeof value === "boolean" || isRecord(value)
+        typeof value === 'boolean' || isRecord(value)
           ? transformSchemaForExactNumbers(value, seen)
           : normalizeSchemaLiteral(value),
       );
@@ -622,7 +641,7 @@ function transformSchemaForExactNumbers(
       defineSafe(
         transformed,
         key,
-        value.map((item) => transformSchemaForExactNumbers(item, seen)),
+        value.map(item => transformSchemaForExactNumbers(item, seen)),
       );
       continue;
     }
@@ -639,7 +658,7 @@ function transformSchemaForExactNumbers(
       );
       continue;
     }
-    if (key === "dependencies" && isRecord(value)) {
+    if (key === 'dependencies' && isRecord(value)) {
       defineSafe(
         transformed,
         key,
@@ -667,19 +686,24 @@ function preserveProtoPropertyForAjv(schema: Record<string, unknown>): void {
     : safeObjectEntries([]);
   let changed = false;
 
-  if (Object.hasOwn(existingPatterns, "__proto__")) {
+  if (Object.hasOwn(existingPatterns, '__proto__')) {
     mergePatternSchema(
       existingPatterns,
-      "(?:__proto__)",
-      existingPatterns.__proto__,
+      '(?:__proto__)',
+      Reflect.get(existingPatterns, '__proto__'),
     );
     changed = true;
   }
-  if (isRecord(properties) && Object.hasOwn(properties, "__proto__")) {
-    mergePatternSchema(existingPatterns, "^__proto__$", properties.__proto__);
+  if (isRecord(properties) && Object.hasOwn(properties, '__proto__')) {
+    mergePatternSchema(
+      existingPatterns,
+      '^__proto__$',
+      Reflect.get(properties, '__proto__'),
+    );
     changed = true;
   }
-  if (changed) defineSafe(schema, "patternProperties", existingPatterns);
+  if (changed)
+    defineSafe(schema, 'patternProperties', existingPatterns);
 }
 
 function mergePatternSchema(
@@ -698,31 +722,32 @@ function mergePatternSchema(
 
 function encodeExactKeyword(key: string, value: unknown): unknown {
   if (
-    key === "minimum" ||
-    key === "maximum" ||
-    key === "exclusiveMinimum" ||
-    key === "exclusiveMaximum" ||
-    key === "multipleOf"
+    key === 'minimum'
+    || key === 'maximum'
+    || key === 'exclusiveMinimum'
+    || key === 'exclusiveMaximum'
+    || key === 'multipleOf'
   ) {
     return rationalConfig(schemaRational(value));
   }
-  if (key === "const") {
+  if (key === 'const') {
     return { fingerprint: exactFingerprint(value, new WeakSet<object>(), true) };
   }
-  if (key === "enum") {
-    if (!Array.isArray(value)) return { fingerprints: [] };
-    const fingerprints = value.map((item) =>
+  if (key === 'enum') {
+    if (!Array.isArray(value))
+      return { fingerprints: [] };
+    const fingerprints = value.map(item =>
       exactFingerprint(item, new WeakSet<object>(), true),
     );
     if (new Set(fingerprints).size !== fingerprints.length) {
       throw new AgentJobsError(
-        "invalid_spec",
-        "JSON Schema enum values must be unique",
+        'invalid_spec',
+        'JSON Schema enum values must be unique',
       );
     }
     return { fingerprints };
   }
-  if (key === "uniqueItems") {
+  if (key === 'uniqueItems') {
     return value === true ? { enabled: true } : undefined;
   }
   return undefined;
@@ -732,24 +757,27 @@ function normalizeSchemaLiteral(
   value: unknown,
   seen = new WeakMap<object, unknown>(),
 ): unknown {
-  if (typeof value === "bigint") {
+  if (typeof value === 'bigint') {
     const numeric = Number(value);
-    if (Number.isFinite(numeric)) return numeric;
+    if (Number.isFinite(numeric))
+      return numeric;
     return value < 0n ? -Number.MAX_SAFE_INTEGER : Number.MAX_SAFE_INTEGER;
   }
-  if (typeof value === "number") {
+  if (typeof value === 'number') {
     if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
       throw new AgentJobsError(
-        "inexact_numeric_schema",
-        "Unsafe JavaScript integer in JSON Schema is ambiguous; use bigint",
+        'inexact_numeric_schema',
+        'Unsafe JavaScript integer in JSON Schema is ambiguous; use bigint',
         { value: value.toString() },
       );
     }
     return value;
   }
-  if (value === null || typeof value !== "object") return value;
+  if (value === null || typeof value !== 'object')
+    return value;
   const previous = seen.get(value);
-  if (previous !== undefined) return previous;
+  if (previous !== undefined)
+    return previous;
   if (Array.isArray(value)) {
     const array: unknown[] = [];
     seen.set(value, array);
@@ -775,13 +803,13 @@ function addExactKeywords(ajv: Ajv2020, context: ExactValidationContext): void {
   ): void => {
     ajv.addKeyword({
       keyword,
-      schemaType: "object",
+      schemaType: 'object',
       errors: false,
       compile(schema: RationalConfig) {
         const bound = rationalFromConfig(schema);
         return (data: unknown, dataContext?: { instancePath?: string }) => {
           const exactData = numericRational(
-            sourceValue(data, dataContext?.instancePath ?? ""),
+            sourceValue(data, dataContext?.instancePath ?? ''),
           );
           return exactData === null || predicate(compareRationals(exactData, bound));
         };
@@ -789,22 +817,23 @@ function addExactKeywords(ajv: Ajv2020, context: ExactValidationContext): void {
     });
   };
 
-  addBound(EXACT_KEYWORDS.minimum, (comparison) => comparison >= 0);
-  addBound(EXACT_KEYWORDS.maximum, (comparison) => comparison <= 0);
-  addBound(EXACT_KEYWORDS.exclusiveMinimum, (comparison) => comparison > 0);
-  addBound(EXACT_KEYWORDS.exclusiveMaximum, (comparison) => comparison < 0);
+  addBound(EXACT_KEYWORDS.minimum, comparison => comparison >= 0);
+  addBound(EXACT_KEYWORDS.maximum, comparison => comparison <= 0);
+  addBound(EXACT_KEYWORDS.exclusiveMinimum, comparison => comparison > 0);
+  addBound(EXACT_KEYWORDS.exclusiveMaximum, comparison => comparison < 0);
 
   ajv.addKeyword({
     keyword: EXACT_KEYWORDS.multipleOf,
-    schemaType: "object",
+    schemaType: 'object',
     errors: false,
     compile(schema: RationalConfig) {
       const divisor = rationalFromConfig(schema);
       return (data: unknown, dataContext?: { instancePath?: string }) => {
         const exactData = numericRational(
-          sourceValue(data, dataContext?.instancePath ?? ""),
+          sourceValue(data, dataContext?.instancePath ?? ''),
         );
-        if (exactData === null) return true;
+        if (exactData === null)
+          return true;
         const numerator = exactData.numerator * divisor.denominator;
         const denominator = exactData.denominator * divisor.numerator;
         return denominator !== 0n && numerator % denominator === 0n;
@@ -814,40 +843,42 @@ function addExactKeywords(ajv: Ajv2020, context: ExactValidationContext): void {
 
   ajv.addKeyword({
     keyword: EXACT_KEYWORDS.const,
-    schemaType: "object",
+    schemaType: 'object',
     errors: false,
     compile(schema: { fingerprint: string }) {
       return (data: unknown, dataContext?: { instancePath?: string }) =>
-        exactFingerprint(sourceValue(data, dataContext?.instancePath ?? "")) ===
-        schema.fingerprint;
+        exactFingerprint(sourceValue(data, dataContext?.instancePath ?? ''))
+        === schema.fingerprint;
     },
   });
 
   ajv.addKeyword({
     keyword: EXACT_KEYWORDS.enum,
-    schemaType: "object",
+    schemaType: 'object',
     errors: false,
     compile(schema: { fingerprints: string[] }) {
       const accepted = new Set(schema.fingerprints);
       return (data: unknown, dataContext?: { instancePath?: string }) =>
         accepted.has(
-          exactFingerprint(sourceValue(data, dataContext?.instancePath ?? "")),
+          exactFingerprint(sourceValue(data, dataContext?.instancePath ?? '')),
         );
     },
   });
 
   ajv.addKeyword({
     keyword: EXACT_KEYWORDS.uniqueItems,
-    schemaType: "object",
+    schemaType: 'object',
     errors: false,
     compile() {
       return (data: unknown, dataContext?: { instancePath?: string }) => {
-        const value = sourceValue(data, dataContext?.instancePath ?? "");
-        if (!Array.isArray(value)) return true;
+        const value = sourceValue(data, dataContext?.instancePath ?? '');
+        if (!Array.isArray(value))
+          return true;
         const seen = new Set<string>();
         for (const item of value) {
           const fingerprint = exactFingerprint(item);
-          if (seen.has(fingerprint)) return false;
+          if (seen.has(fingerprint))
+            return false;
           seen.add(fingerprint);
         }
         return true;
@@ -860,22 +891,24 @@ function schemaRational(value: unknown): Rational {
   const rational = numericRational(value, true);
   if (rational === null) {
     throw new AgentJobsError(
-      "invalid_spec",
-      "Numeric JSON Schema keyword must contain a finite number",
+      'invalid_spec',
+      'Numeric JSON Schema keyword must contain a finite number',
     );
   }
   return rational;
 }
 
 function numericRational(value: unknown, schema = false): Rational | null {
-  if (typeof value === "bigint") return { numerator: value, denominator: 1n };
-  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  if (typeof value === 'bigint')
+    return { numerator: value, denominator: 1n };
+  if (typeof value !== 'number' || !Number.isFinite(value))
+    return null;
   if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
     throw new AgentJobsError(
-      schema ? "inexact_numeric_schema" : "inexact_number",
+      schema ? 'inexact_numeric_schema' : 'inexact_number',
       schema
-        ? "Unsafe JavaScript integer in JSON Schema is ambiguous; use bigint"
-        : "Unsafe JavaScript integer cannot be schema-validated exactly; use bigint",
+        ? 'Unsafe JavaScript integer in JSON Schema is ambiguous; use bigint'
+        : 'Unsafe JavaScript integer cannot be schema-validated exactly; use bigint',
       { value: value.toString() },
     );
   }
@@ -884,15 +917,18 @@ function numericRational(value: unknown, schema = false): Rational | null {
 
 function rationalFromDecimal(value: string): Rational {
   const match = /^(-?)(\d+)(?:\.(\d+))?(?:e([+-]?\d+))?$/i.exec(value);
-  if (!match) throw new Error(`Not a finite decimal number: ${value}`);
-  const fraction = match[3] ?? "";
-  const exponent = Number(match[4] ?? "0");
+  if (!match)
+    throw new Error(`Not a finite decimal number: ${value}`);
+  const fraction = match[3] ?? '';
+  const exponent = Number(match[4] ?? '0');
   const digits = `${match[2]}${fraction}`;
-  let numerator = BigInt(digits || "0");
-  if (match[1] === "-") numerator = -numerator;
+  let numerator = BigInt(digits || '0');
+  if (match[1] === '-')
+    numerator = -numerator;
   const scale = fraction.length - exponent;
   let denominator = 1n;
-  if (scale <= 0) numerator *= 10n ** BigInt(-scale);
+  if (scale <= 0)
+    numerator *= 10n ** BigInt(-scale);
   else denominator = 10n ** BigInt(scale);
   return reduceRational({ numerator, denominator });
 }
@@ -935,8 +971,8 @@ function rationalFromConfig(value: RationalConfig): Rational {
 }
 
 function compareRationals(left: Rational, right: Rational): number {
-  const comparison =
-    left.numerator * right.denominator - right.numerator * left.denominator;
+  const comparison
+    = left.numerator * right.denominator - right.numerator * left.denominator;
   return comparison < 0n ? -1 : comparison > 0n ? 1 : 0;
 }
 
@@ -950,41 +986,49 @@ function exactFingerprint(
     const reduced = reduceRational(numeric);
     return `number:${reduced.numerator}/${reduced.denominator}`;
   }
-  if (value === null) return "null";
-  if (typeof value === "string") return `string:${JSON.stringify(value)}`;
-  if (typeof value === "boolean") return `boolean:${value ? "1" : "0"}`;
-  if (typeof value !== "object") return `${typeof value}:${String(value)}`;
-  if (seen.has(value)) throw new Error("cyclic values cannot be compared exactly");
+  if (value === null)
+    return 'null';
+  if (typeof value === 'string')
+    return `string:${JSON.stringify(value)}`;
+  if (typeof value === 'boolean')
+    return `boolean:${value ? '1' : '0'}`;
+  if (typeof value !== 'object')
+    return `${typeof value}:${String(value)}`;
+  if (seen.has(value))
+    throw new Error('cyclic values cannot be compared exactly');
   seen.add(value);
   let result: string;
   if (Array.isArray(value)) {
     result = `array:[${value
-      .map((item) => exactFingerprint(item, seen, schemaNumbers))
-      .join(",")}]`;
+      .map(item => exactFingerprint(item, seen, schemaNumbers))
+      .join(',')}]`;
   } else {
     const entries = Object.keys(value)
       .sort(compareCodePoints)
       .map(
-        (key) =>
+        key =>
           `${JSON.stringify(key)}:${exactFingerprint(
             (value as Record<string, unknown>)[key],
             seen,
             schemaNumbers,
           )}`,
       );
-    result = `object:{${entries.join(",")}}`;
+    result = `object:{${entries.join(',')}}`;
   }
   seen.delete(value);
   return result;
 }
 
 function valueAtPointer(root: unknown, pointer: string): unknown {
-  if (pointer === "") return root;
+  if (pointer === '')
+    return root;
   let current = root;
-  for (const rawToken of pointer.slice(1).split("/")) {
-    const token = rawToken.replaceAll("~1", "/").replaceAll("~0", "~");
-    if (Array.isArray(current)) current = current[Number(token)];
-    else if (isRecord(current) && Object.hasOwn(current, token)) current = current[token];
+  for (const rawToken of pointer.slice(1).split('/')) {
+    const token = rawToken.replaceAll('~1', '/').replaceAll('~0', '~');
+    if (Array.isArray(current))
+      current = current[Number(token)];
+    else if (isRecord(current) && Object.hasOwn(current, token))
+      current = current[token];
     else return undefined;
   }
   return current;
@@ -1004,12 +1048,13 @@ function defineSafe(
 }
 
 function compareCodePoints(left: string, right: string): number {
-  const leftPoints = Array.from(left, (character) => character.codePointAt(0) ?? 0);
-  const rightPoints = Array.from(right, (character) => character.codePointAt(0) ?? 0);
+  const leftPoints = Array.from(left, character => character.codePointAt(0) ?? 0);
+  const rightPoints = Array.from(right, character => character.codePointAt(0) ?? 0);
   const length = Math.min(leftPoints.length, rightPoints.length);
   for (let index = 0; index < length; index += 1) {
     const difference = (leftPoints[index] ?? 0) - (rightPoints[index] ?? 0);
-    if (difference !== 0) return difference;
+    if (difference !== 0)
+      return difference;
   }
   return leftPoints.length - rightPoints.length;
 }
@@ -1018,30 +1063,33 @@ function normalizeYamlObject(
   value: unknown,
   seen = new WeakSet<object>(),
 ): unknown {
-  if (typeof value === "bigint") {
-    if (value >= MIN_SAFE_BIGINT && value <= MAX_SAFE_BIGINT) return Number(value);
+  if (typeof value === 'bigint') {
+    if (value >= MIN_SAFE_BIGINT && value <= MAX_SAFE_BIGINT)
+      return Number(value);
     return value;
   }
-  if (value === null || ["string", "boolean"].includes(typeof value)) {
+  if (value === null || ['string', 'boolean'].includes(typeof value)) {
     return value;
   }
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new Error("non-finite YAML number");
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value))
+      throw new Error('non-finite YAML number');
     return value;
   }
-  if (typeof value !== "object") {
-    throw new Error(`frontmatter contains a non-JSON value of type ${typeof value}`);
+  if (typeof value !== 'object') {
+    throw new TypeError(`frontmatter contains a non-JSON value of type ${typeof value}`);
   }
-  if (seen.has(value)) throw new Error("cyclic YAML aliases are not supported");
+  if (seen.has(value))
+    throw new Error('cyclic YAML aliases are not supported');
   seen.add(value);
   let result: unknown;
   if (Array.isArray(value)) {
-    result = value.map((item) => normalizeYamlObject(item, seen));
+    result = value.map(item => normalizeYamlObject(item, seen));
   } else if (value instanceof Map) {
     const entries: Array<[string, unknown]> = [];
     for (const [key, item] of value.entries()) {
-      if (typeof key !== "string") {
-        throw new Error("frontmatter mapping keys must be strings");
+      if (typeof key !== 'string') {
+        throw new TypeError('frontmatter mapping keys must be strings');
       }
       entries.push([key, normalizeYamlObject(item, seen)]);
     }
@@ -1059,14 +1107,17 @@ function normalizeYamlObject(
 }
 
 function resolveSpecPath(value: FilePath): string {
-  if (value instanceof URL) return fileURLToPath(value);
-  if (value === "~") return homedir();
-  if (value.startsWith("~/")) return resolve(homedir(), value.slice(2));
+  if (value instanceof URL)
+    return fileURLToPath(value);
+  if (value === '~')
+    return homedir();
+  if (value.startsWith('~/'))
+    return resolve(homedir(), value.slice(2));
   return resolve(value);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function errorMessage(error: unknown): string {

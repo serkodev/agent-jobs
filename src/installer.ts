@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { constants as fsConstants } from 'node:fs';
 import {
   access,
   lstat,
@@ -9,16 +10,16 @@ import {
   rmdir,
   writeFile,
 } from 'node:fs/promises';
-import { constants as fsConstants } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import process from 'node:process';
 import { createInterface } from 'node:readline/promises';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
 import {
-  atomicWriteText,
   AgentJobsError,
+  atomicWriteText,
   stringifyStrictJson,
 } from '@agent-jobs/runtime';
 
@@ -26,12 +27,12 @@ import {
   AGENTS_BLOCK_END,
   AGENTS_BLOCK_START,
   CLAUDE_ALLOWED_TOOLS,
-  CODEX_CONFIG_BLOCK_END,
-  CODEX_CONFIG_BLOCK_START,
   claudeMcpServer,
   claudePostprocessor,
   claudeSkill,
   claudeWorker,
+  CODEX_CONFIG_BLOCK_END,
+  CODEX_CONFIG_BLOCK_START,
   codexConfigBlock,
   codexPostprocessor,
   codexSkill,
@@ -136,12 +137,12 @@ function parseInstallArguments(args: readonly string[]): InstallArguments {
       allowPositionals: true,
       strict: true,
       options: {
-        target: { type: 'string' },
-        global: { type: 'boolean' },
-        yes: { type: 'boolean' },
+        'target': { type: 'string' },
+        'global': { type: 'boolean' },
+        'yes': { type: 'boolean' },
         'dry-run': { type: 'boolean' },
-        force: { type: 'boolean' },
-        json: { type: 'boolean' },
+        'force': { type: 'boolean' },
+        'json': { type: 'boolean' },
       },
     });
   } catch (error) {
@@ -181,7 +182,8 @@ async function fileText(path: string): Promise<string | null> {
   try {
     return await readFile(path, 'utf8');
   } catch (error) {
-    if (hasCode(error, 'ENOENT')) return null;
+    if (hasCode(error, 'ENOENT'))
+      return null;
     throw error;
   }
 }
@@ -191,7 +193,8 @@ async function pathInfo(path: string): Promise<'missing' | 'directory' | 'other'
     const info = await lstat(path);
     return info.isDirectory() && !info.isSymbolicLink() ? 'directory' : 'other';
   } catch (error) {
-    if (hasCode(error, 'ENOENT')) return 'missing';
+    if (hasCode(error, 'ENOENT'))
+      return 'missing';
     throw error;
   }
 }
@@ -211,9 +214,9 @@ function replaceManagedBlock(
     );
   }
   if (
-    startIndex !== -1 &&
-    (current.indexOf(start, startIndex + start.length) !== -1 ||
-      current.indexOf(end, endIndex + end.length) !== -1)
+    startIndex !== -1
+    && (current.includes(start, startIndex + start.length)
+      || current.includes(end, endIndex + end.length))
   ) {
     throw new AgentJobsError(
       'config_conflict',
@@ -230,16 +233,19 @@ function replaceManagedBlock(
 
 function withoutManagedBlock(current: string, start: string, end: string): string {
   const startIndex = current.indexOf(start);
-  if (startIndex === -1) return current;
+  if (startIndex === -1)
+    return current;
   const endIndex = current.indexOf(end, startIndex + start.length);
-  if (endIndex === -1) return current;
+  if (endIndex === -1)
+    return current;
   return `${current.slice(0, startIndex)}${current.slice(endIndex + end.length)}`;
 }
 
 function tomlSection(text: string, name: string): string | null {
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const header = new RegExp(`^\\[${escaped}\\]\\s*$`, 'm').exec(text);
-  if (!header) return null;
+  if (!header)
+    return null;
   const bodyStart = header.index + header[0].length;
   const rest = text.slice(bodyStart);
   const nextSection = /^\s*\[/m.exec(rest);
@@ -247,10 +253,12 @@ function tomlSection(text: string, name: string): string | null {
 }
 
 function parseJsonObject(text: string | null, path: string): Record<string, unknown> {
-  if (text === null || text.trim() === '') return {};
+  if (text === null || text.trim() === '')
+    return {};
   try {
     const value: unknown = JSON.parse(text);
-    if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error();
+    if (value === null || typeof value !== 'object' || Array.isArray(value))
+      throw new Error('Expected a JSON object');
     return value as Record<string, unknown>;
   } catch {
     throw new AgentJobsError('config_conflict', `Expected a JSON object in ${path}`, {
@@ -271,10 +279,10 @@ function mergeClaudeMcp(
   const root = parseJsonObject(current, path);
   const rawServers = root.mcpServers;
   if (
-    rawServers !== undefined &&
-    (rawServers === null ||
-      typeof rawServers !== 'object' ||
-      Array.isArray(rawServers))
+    rawServers !== undefined
+    && (rawServers === null
+      || typeof rawServers !== 'object'
+      || Array.isArray(rawServers))
   ) {
     throw new AgentJobsError('config_conflict', `mcpServers must be an object in ${path}`);
   }
@@ -297,10 +305,10 @@ function mergeClaudeSettings(current: string | null, path: string): string {
   const enabled = Array.isArray(root.enabledMcpjsonServers)
     ? root.enabledMcpjsonServers.filter((item): item is string => typeof item === 'string')
     : [];
-  const permissions =
-    root.permissions !== null &&
-    typeof root.permissions === 'object' &&
-    !Array.isArray(root.permissions)
+  const permissions
+    = root.permissions !== null
+      && typeof root.permissions === 'object'
+      && !Array.isArray(root.permissions)
       ? (root.permissions as Record<string, unknown>)
       : {};
   const allow = Array.isArray(permissions.allow)
@@ -396,10 +404,13 @@ function installLocations(
 }
 
 async function resolveBundlePath(explicit?: string): Promise<string> {
-  if (explicit !== undefined) return resolve(explicit);
-  if (process.env.AGENT_JOBS_BUNDLE_PATH) return resolve(process.env.AGENT_JOBS_BUNDLE_PATH);
+  if (explicit !== undefined)
+    return resolve(explicit);
+  if (process.env.AGENT_JOBS_BUNDLE_PATH)
+    return resolve(process.env.AGENT_JOBS_BUNDLE_PATH);
   const ownPath = fileURLToPath(import.meta.url);
-  if (basename(ownPath) === 'agent-jobs.mjs') return ownPath;
+  if (basename(ownPath) === 'agent-jobs.mjs')
+    return ownPath;
   return resolve(dirname(ownPath), '..', 'dist', 'agent-jobs.mjs');
 }
 
@@ -414,8 +425,8 @@ async function buildFiles(
     const locations = installLocations(root, scope, target);
     const scriptPath = join(locations.skillDir, 'scripts', 'agent-jobs.mjs');
     const instructionCurrent = await fileText(locations.instruction);
-    const instructionSkillPath =
-      scope === 'project'
+    const instructionSkillPath
+      = scope === 'project'
         ? relative(root, join(locations.skillDir, 'SKILL.md')) || 'SKILL.md'
         : join(locations.skillDir, 'SKILL.md');
     files.push(
@@ -569,23 +580,26 @@ async function readManifest(
   scope: Scope,
 ): Promise<InstallManifest | undefined> {
   const text = await fileText(path);
-  if (text === null) return undefined;
+  if (text === null)
+    return undefined;
   try {
     const manifest = JSON.parse(text) as InstallManifest;
-    if (manifest.schema_version !== 1 || !Array.isArray(manifest.files)) throw new Error();
-    if (manifest.root !== root || manifest.scope !== scope) throw new Error();
+    if (manifest.schema_version !== 1 || !Array.isArray(manifest.files))
+      throw new Error('Invalid manifest schema');
+    if (manifest.root !== root || manifest.scope !== scope)
+      throw new Error('Manifest target mismatch');
     const allowed = allowedInstallPaths(root, scope);
     const backupRoot = join(dirname(path), 'backups');
     for (const entry of manifest.files) {
       if (
-        typeof entry.path !== 'string' ||
-        !allowed.has(entry.path) ||
-        !/^[a-f0-9]{64}$/.test(entry.installed_sha256) ||
-        typeof entry.original_existed !== 'boolean' ||
-        (entry.backup_path !== null &&
-          (typeof entry.backup_path !== 'string' || !isWithin(entry.backup_path, backupRoot)))
+        typeof entry.path !== 'string'
+        || !allowed.has(entry.path)
+        || !/^[a-f0-9]{64}$/.test(entry.installed_sha256)
+        || typeof entry.original_existed !== 'boolean'
+        || (entry.backup_path !== null
+          && (typeof entry.backup_path !== 'string' || !isWithin(entry.backup_path, backupRoot)))
       ) {
-        throw new Error();
+        throw new Error('Invalid manifest entry');
       }
     }
     return manifest;
@@ -627,11 +641,14 @@ async function pruneEmptyParents(start: string, stop: string): Promise<void> {
     try {
       await rmdir(cursor);
     } catch (error) {
-      if (hasCode(error, 'ENOENT')) return;
-      if (hasCode(error, 'ENOTEMPTY') || hasCode(error, 'EEXIST')) return;
+      if (hasCode(error, 'ENOENT'))
+        return;
+      if (hasCode(error, 'ENOTEMPTY') || hasCode(error, 'EEXIST'))
+        return;
       throw error;
     }
-    if (cursor === stop) return;
+    if (cursor === stop)
+      return;
     cursor = dirname(cursor);
   }
 }
@@ -641,15 +658,17 @@ async function preflightFiles(
   manifest: InstallManifest | undefined,
   force: boolean,
 ): Promise<void> {
-  const prior = new Map(manifest?.files.map((entry) => [entry.path, entry]) ?? []);
+  const prior = new Map(manifest?.files.map(entry => [entry.path, entry]) ?? []);
   for (const file of files) {
     const current = await fileText(file.path);
-    if (current === null || current === file.content) continue;
+    if (current === null || current === file.content)
+      continue;
     const entry = prior.get(file.path);
     if (file.kind === 'merged') {
-      const isUnmodifiedInstall =
-        entry !== undefined && hash(current) === entry.installed_sha256;
-      if (isUnmodifiedInstall || !isAgentJobsManaged(current)) continue;
+      const isUnmodifiedInstall
+        = entry !== undefined && hash(current) === entry.installed_sha256;
+      if (isUnmodifiedInstall || !isAgentJobsManaged(current))
+        continue;
       if (!force) {
         throw new AgentJobsError(
           'target_conflict',
@@ -695,7 +714,7 @@ async function applyInit(plan: InstallPlan): Promise<{ changed: string[]; warnin
   const changed: string[] = [];
   const warnings: string[] = [];
   const createdRoot = plan.createRoot;
-  const previous = new Map(plan.manifest?.files.map((entry) => [entry.path, entry]) ?? []);
+  const previous = new Map(plan.manifest?.files.map(entry => [entry.path, entry]) ?? []);
   const entries = new Map(previous);
   const backupRoot = join(
     dirname(plan.manifestPath),
@@ -704,7 +723,8 @@ async function applyInit(plan: InstallPlan): Promise<{ changed: string[]; warnin
   );
   const applied: Array<{ path: string; original: string | null }> = [];
   try {
-    if (createdRoot) await mkdir(plan.root, { recursive: true });
+    if (createdRoot)
+      await mkdir(plan.root, { recursive: true });
     for (const file of plan.files) {
       const current = await fileText(file.path);
       const previousEntry = previous.get(file.path);
@@ -723,9 +743,9 @@ async function applyInit(plan: InstallPlan): Promise<{ changed: string[]; warnin
       let backupPath: string | null = null;
       let originalExisted = current !== null;
       if (
-        current !== null &&
-        previousEntry !== undefined &&
-        hash(current) === previousEntry.installed_sha256
+        current !== null
+        && previousEntry !== undefined
+        && hash(current) === previousEntry.installed_sha256
       ) {
         backupPath = previousEntry.backup_path;
         originalExisted = previousEntry.original_existed;
@@ -755,12 +775,14 @@ async function applyInit(plan: InstallPlan): Promise<{ changed: string[]; warnin
       sortKeys: true,
     });
     await atomicWriteText(plan.manifestPath, `${manifestText}\n`);
-    if (changed.length === 0) warnings.push('Installation is already up to date.');
+    if (changed.length === 0)
+      warnings.push('Installation is already up to date.');
     return { changed, warnings };
   } catch (error) {
     for (const item of applied.reverse()) {
       try {
-        if (item.original === null) await rm(item.path, { force: true });
+        if (item.original === null)
+          await rm(item.path, { force: true });
         else await atomicWriteText(item.path, item.original);
       } catch {
         warnings.push(`Rollback could not restore ${item.path}`);
@@ -791,21 +813,25 @@ async function applyUninstall(
 ): Promise<{ changed: string[]; warnings: string[] }> {
   const changed: string[] = [];
   const warnings: string[] = [];
-  if (!plan.manifest) return { changed, warnings };
+  if (!plan.manifest)
+    return { changed, warnings };
   const selected = new Set(plan.targets);
   const codexPaths = targetInstallPaths(plan.root, plan.scope, 'codex');
   const claudePaths = targetInstallPaths(plan.root, plan.scope, 'claude');
   const remaining: ManifestEntry[] = [];
   for (const entry of plan.manifest.files) {
     let target: 'codex' | 'claude' | null = null;
-    if (codexPaths.has(entry.path)) target = 'codex';
-    else if (claudePaths.has(entry.path)) target = 'claude';
+    if (codexPaths.has(entry.path))
+      target = 'codex';
+    else if (claudePaths.has(entry.path))
+      target = 'claude';
     if (target === null || !selected.has(target)) {
       remaining.push(entry);
       continue;
     }
     const current = await fileText(entry.path);
-    if (current === null) continue;
+    if (current === null)
+      continue;
     if (hash(current) !== entry.installed_sha256) {
       warnings.push(`Preserved locally modified file: ${entry.path}`);
       remaining.push(entry);
@@ -834,7 +860,7 @@ async function applyUninstall(
   if (remaining.length === 0) {
     await rm(plan.manifestPath, { force: true });
   } else {
-    const targets = plan.manifest.targets.filter((target) => !selected.has(target));
+    const targets = plan.manifest.targets.filter(target => !selected.has(target));
     const manifestText = stringifyStrictJson(
       { ...plan.manifest, targets, files: remaining },
       { pretty: true, sortKeys: true },
@@ -898,7 +924,7 @@ async function createPlan(
 function promptText(plan: InstallPlan): string {
   const verb = plan.operation === 'init' ? 'Initialize' : 'Uninstall';
   const targets = plan.targets
-    .map((target) => (target === 'codex' ? 'Codex' : 'Claude'))
+    .map(target => (target === 'codex' ? 'Codex' : 'Claude'))
     .join(', ');
   const create = plan.createRoot ? 'yes' : 'no';
   return `${verb} agent-jobs?\n\nPath:    ${plan.root}\nCreate:  ${create}\nTargets: ${targets}\nScope:   ${plan.scope}\n\nProceed? [y/N] `;
@@ -906,7 +932,8 @@ function promptText(plan: InstallPlan): string {
 
 async function confirmPlan(plan: InstallPlan, environment: InstallerEnvironment): Promise<boolean> {
   const message = promptText(plan);
-  if (environment.confirm) return environment.confirm(message);
+  if (environment.confirm)
+    return environment.confirm(message);
   const input = environment.stdin ?? (process.stdin as Readable);
   const output = environment.stderr ?? process.stderr;
   const rl = createInterface({
@@ -925,8 +952,10 @@ async function confirmPlan(plan: InstallPlan, environment: InstallerEnvironment)
 }
 
 function humanResult(result: InstallerCommandResult): string {
-  if (result.status === 'cancelled') return `Cancelled; no files were changed in ${result.path}.\n`;
-  if (result.status === 'not_installed') return `agent-jobs is not installed in ${result.path}.\n`;
+  if (result.status === 'cancelled')
+    return `Cancelled; no files were changed in ${result.path}.\n`;
+  if (result.status === 'not_installed')
+    return `agent-jobs is not installed in ${result.path}.\n`;
   if (result.status === 'dry_run') {
     return `Dry run for ${result.path}: ${result.changed_files.length} file(s) would change.\n`;
   }
@@ -960,10 +989,10 @@ export async function runInstallerCommand(
     stdout.write(args.json ? `${JSON.stringify(result)}\n` : humanResult(result));
     return 0;
   }
-  const previewFiles =
-    operation === 'init'
-      ? plan.files.map((file) => file.path)
-      : plan.manifest!.files.map((file) => file.path);
+  const previewFiles
+    = operation === 'init'
+      ? plan.files.map(file => file.path)
+      : plan.manifest!.files.map(file => file.path);
   if (args.dryRun) {
     const result: InstallerCommandResult = {
       ...base,
@@ -1007,9 +1036,9 @@ export async function runInstallerCommand(
 
 function hasCode(error: unknown, code: string): boolean {
   return (
-    error !== null &&
-    typeof error === 'object' &&
-    'code' in error &&
-    (error as { code?: unknown }).code === code
+    error !== null
+    && typeof error === 'object'
+    && 'code' in error
+    && (error as { code?: unknown }).code === code
   );
 }

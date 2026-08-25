@@ -5,9 +5,9 @@ import codexAgentsEnabledToml from '../templates/install/codex/agents-enabled.to
 import codexPostprocessorToml from '../templates/install/codex/agents/agent_job_postprocessor.toml?raw';
 import codexWorkerToml from '../templates/install/codex/agents/agent_job_worker.toml?raw';
 import codexConfigToml from '../templates/install/codex/config.toml?raw';
+import openAiMetadataYaml from '../templates/install/codex/openai.yaml?raw';
 import codexProjectEnvToml from '../templates/install/codex/project-env.toml?raw';
 import codexWorkerOrchestration from '../templates/install/codex/worker-orchestration.md?raw';
-import openAiMetadataYaml from '../templates/install/codex/openai.yaml?raw';
 import routingBlockMarkdown from '../templates/install/routing-block.md?raw';
 import sharedSkillMarkdown from '../templates/install/shared/SKILL.md?raw';
 
@@ -67,7 +67,8 @@ export function openAiMetadata(): string {
 }
 
 function codexProjectEnv(projectRoot?: string): string {
-  if (projectRoot === undefined) return '';
+  if (projectRoot === undefined)
+    return '';
   return `\n${renderTemplate(codexProjectEnvToml, {
     PROJECT_ROOT: tomlString(projectRoot),
   }).trimEnd()}`;

@@ -1,19 +1,20 @@
+import type { CollectFormat, OnError, PrepareOptions } from '@agent-jobs/runtime';
+import type { InstallerEnvironment } from './installer.js';
+
 import { writeSync } from 'node:fs';
+import process from 'node:process';
 import { parseArgs } from 'node:util';
 
 import {
-  AgentJobsRuntime,
   AgentJobsError,
-  type CollectFormat,
-  type OnError,
-  type PrepareOptions,
+  AgentJobsRuntime,
+
   runMcpServer,
   stringifyStrictJson,
 } from '@agent-jobs/runtime';
-
 import {
+
   runInstallerCommand,
-  type InstallerEnvironment,
 } from './installer.js';
 
 const COLLECT_FORMATS: ReadonlySet<CollectFormat> = new Set([
@@ -30,8 +31,8 @@ const ON_ERROR_POLICIES: ReadonlySet<OnError> = new Set([
 type JsonObject = Record<string, unknown>;
 type Writable = Pick<NodeJS.WritableStream, 'write'>;
 interface SignalTarget {
-  once(event: 'SIGINT', listener: () => void): unknown;
-  removeListener(event: 'SIGINT', listener: () => void): unknown;
+  once: (event: 'SIGINT', listener: () => void) => unknown;
+  removeListener: (event: 'SIGINT', listener: () => void) => unknown;
 }
 
 export interface CliDependencies {
@@ -95,7 +96,8 @@ function optionalInteger(
   name: string,
 ): number | undefined {
   const raw = optionalString(values, name);
-  if (raw === undefined) return undefined;
+  if (raw === undefined)
+    return undefined;
   if (!/^[+-]?\d+$/.test(raw)) {
     invalidArguments(`--${name} must be an integer`);
   }
@@ -137,7 +139,8 @@ function parseStrict(
     }
     return values;
   } catch (error) {
-    if (error instanceof AgentJobsError) throw error;
+    if (error instanceof AgentJobsError)
+      throw error;
     invalidArguments(error instanceof Error ? error.message : String(error));
   }
 }
@@ -165,7 +168,7 @@ async function dispatch(
       'id-column-key': { type: 'string' },
       'output-dir': { type: 'string' },
       'records-path': { type: 'string' },
-      model: { type: 'string' },
+      'model': { type: 'string' },
       'reasoning-effort': { type: 'string' },
       'max-concurrency': { type: 'string' },
       'max-retries': { type: 'string' },
@@ -211,7 +214,7 @@ async function dispatch(
     const values = parseStrict(args, {
       'output-dir': { type: 'string' },
       'job-id': { type: 'string' },
-      count: { type: 'string' },
+      'count': { type: 'string' },
     });
     const count = optionalInteger(values, 'count') ?? 1;
     return runtime.next(
@@ -235,7 +238,7 @@ async function dispatch(
     const values = parseStrict(args, {
       'output-dir': { type: 'string' },
       'job-id': { type: 'string' },
-      format: { type: 'string' },
+      'format': { type: 'string' },
     });
     const format = assertChoice(
       requiredString(values, 'format'),
@@ -286,13 +289,15 @@ export async function runCli(
   }
 
   try {
-    if (!command) invalidArguments('A command is required');
+    if (!command)
+      invalidArguments('A command is required');
     if (argv.slice(1).includes('--help') || argv.slice(1).includes('-h')) {
       stdout.write(HELP);
       return 0;
     }
     if (command === 'mcp') {
-      if (argv.length !== 1) invalidArguments('The mcp command accepts no options');
+      if (argv.length !== 1)
+        invalidArguments('The mcp command accepts no options');
       await (dependencies.runMcp ?? runMcpServer)();
       return 0;
     }
@@ -304,9 +309,9 @@ export async function runCli(
       });
     }
 
-    const runtime =
-      dependencies.runtime ??
-      (dependencies.runtimeFactory ?? (() => new AgentJobsRuntime()))();
+    const runtime
+      = dependencies.runtime
+        ?? (dependencies.runtimeFactory ?? (() => new AgentJobsRuntime()))();
     const result = await dispatch(runtime, command, argv.slice(1));
     emit(stdout, { ok: true, ...result });
     return command === 'doctor' && result.ok === false ? 2 : 0;
@@ -348,12 +353,14 @@ export async function runProcessCli(
   let interrupted = false;
   const guardedStdout: Writable = {
     write(chunk: unknown): boolean {
-      if (interrupted) return true;
+      if (interrupted)
+        return true;
       return stdout.write(String(chunk));
     },
   };
   const onInterrupt = (): void => {
-    if (interrupted) return;
+    if (interrupted)
+      return;
     interrupted = true;
     if (argv[0] === 'mcp') {
       writeSignalSafe(stderr, 'MCP server interrupted\n');

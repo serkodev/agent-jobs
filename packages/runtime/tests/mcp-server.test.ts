@@ -1,8 +1,9 @@
+import type { AgentJobsRuntime } from '../src/state.js';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { InMemoryTransport, McpServer } from '@modelcontextprotocol/server';
-import { describe, expect, it, vi } from 'vitest';
 
+import { describe, expect, it, vi } from 'vitest';
 import { AgentJobsError } from '../src/errors.js';
 import {
   AGENT_JOBS_TOOL_NAMES,
@@ -11,7 +12,6 @@ import {
   reportFailure,
   submitResult,
 } from '../src/mcp-server.js';
-import type { AgentJobsRuntime } from '../src/state.js';
 import { parseStrictJson } from '../src/storage.js';
 
 function runtimeWith(overrides: Partial<AgentJobsRuntime>): AgentJobsRuntime {
@@ -44,9 +44,9 @@ describe('agent_jobs MCP surface', () => {
         client.connect(clientTransport),
       ]);
       const tools = await client.listTools();
-      expect(tools.tools.map((tool) => tool.name)).toEqual(AGENT_JOBS_TOOL_NAMES);
+      expect(tools.tools.map(tool => tool.name)).toEqual(AGENT_JOBS_TOOL_NAMES);
       expect(
-        tools.tools.find((tool) => tool.name === 'submit_result')?.inputSchema,
+        tools.tools.find(tool => tool.name === 'submit_result')?.inputSchema,
       ).toMatchObject({
         type: 'object',
         required: ['handle'],
@@ -99,7 +99,7 @@ describe('agent_jobs MCP surface', () => {
     try {
       await client.connect(transport);
       const tools = await client.listTools();
-      expect(tools.tools.map((tool) => tool.name)).toEqual(AGENT_JOBS_TOOL_NAMES);
+      expect(tools.tools.map(tool => tool.name)).toEqual(AGENT_JOBS_TOOL_NAMES);
     } finally {
       await client.close();
     }
@@ -159,7 +159,7 @@ describe('agent_jobs MCP surface', () => {
       });
       const submitted = submit.mock.calls[0]?.[1] as Record<string, unknown>;
       expect(Object.hasOwn(submitted, '__proto__')).toBe(true);
-      expect(submitted.__proto__).toEqual({ kept: true });
+      expect(Reflect.get(submitted, '__proto__')).toEqual({ kept: true });
       expect(Object.getPrototypeOf(submitted)).toBe(Object.prototype);
     } finally {
       await client.close();
@@ -191,7 +191,7 @@ describe('agent_jobs MCP surface', () => {
       const submitted = submit.mock.calls[0]?.[1] as Record<string, unknown>;
       expect(submitted.exact).toBe(9223372036854775807n);
       expect(Object.hasOwn(submitted, '__proto__')).toBe(true);
-      expect(submitted.__proto__).toEqual({ kept: true });
+      expect(Reflect.get(submitted, '__proto__')).toEqual({ kept: true });
       expect(Object.getPrototypeOf(submitted)).toBe(Object.prototype);
     } finally {
       await client.close();
@@ -244,8 +244,8 @@ describe('agent_jobs MCP surface', () => {
         });
         expect(response.isError).toBe(true);
         failureText = response.content
-          .filter((content) => content.type === 'text')
-          .map((content) => content.text)
+          .filter(content => content.type === 'text')
+          .map(content => content.text)
           .join('\n');
       } catch (error) {
         failureText = error instanceof Error ? error.message : String(error);

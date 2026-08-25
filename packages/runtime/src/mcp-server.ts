@@ -12,17 +12,16 @@ export const AGENT_JOBS_TOOL_NAMES = [
   'report_failure',
 ] as const;
 
-type SubmitToolArguments =
-  | {
-      handle: string;
-      result: Record<string, unknown>;
-      result_json?: never;
-    }
-  | {
-      handle: string;
-      result?: never;
-      result_json: string;
-    };
+type SubmitToolArguments = {
+  handle: string;
+  result: Record<string, unknown>;
+  result_json?: never;
+}
+| {
+  handle: string;
+  result?: never;
+  result_json: string;
+};
 
 const submitToolJsonSchema = {
   type: 'object',
@@ -71,10 +70,11 @@ const submitToolInputSchema = {
           message: 'exactly one of result or result_json is required',
         });
       } else if (
-        hasResult &&
-        (object.result === null ||
-          typeof object.result !== 'object' ||
-          Array.isArray(object.result))
+        hasResult && (
+          object.result === null
+          || typeof object.result !== 'object'
+          || Array.isArray(object.result)
+        )
       ) {
         issues.push({ message: 'result must be an object', path: [{ key: 'result' }] });
       } else if (hasResultJson && typeof object.result_json !== 'string') {
@@ -165,10 +165,9 @@ async function submitToolResult(
   runtime: AgentJobsRuntime,
 ): Promise<Awaited<ReturnType<AgentJobsRuntime['submitResult']>>> {
   return invokeRuntime(() => {
-    const result =
-      typeof arguments_.result_json === 'string'
-        ? parseResultJson(arguments_.result_json)
-        : arguments_.result;
+    const result = typeof arguments_.result_json === 'string'
+      ? parseResultJson(arguments_.result_json)
+      : arguments_.result;
     return runtime.submitResult(arguments_.handle, result);
   });
 }
@@ -183,8 +182,10 @@ export async function reportFailure(
 }
 
 function jsonSafe(value: unknown): unknown {
-  if (typeof value === 'bigint') return value.toString(10);
-  if (Array.isArray(value)) return value.map(jsonSafe);
+  if (typeof value === 'bigint')
+    return value.toString(10);
+  if (Array.isArray(value))
+    return value.map(jsonSafe);
   if (value !== null && typeof value === 'object') {
     return Object.fromEntries(
       Object.entries(value).map(([key, item]) => [key, jsonSafe(item)]),
@@ -253,7 +254,7 @@ export function createAgentJobsServer(
         'Validate and atomically commit one assignment. Pass result_json for exact JSON numeric literals, or result for a JSON object.',
       inputSchema: submitToolInputSchema,
     },
-    async (arguments_) =>
+    async arguments_ =>
       toolResult(await submitToolResult(arguments_, runtime)),
   );
 
