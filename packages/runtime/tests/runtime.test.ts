@@ -26,7 +26,7 @@ import {
 
 type Lease = { id: string; handle: string };
 type Prepared = {
-  invocation_id: string;
+  job_id: string;
   output_dir: string;
   counts: Record<string, number>;
   worker: { model: string | null; reasoning_effort: string | null };
@@ -129,10 +129,10 @@ async function prepare(
 
 async function nextLeases(
   context: Awaited<ReturnType<typeof fixture>>,
-  invocationId: string,
+  jobId: string,
   count = 1,
 ): Promise<Lease[]> {
-  const result = await context.runtime.next(context.outputDir, invocationId, {
+  const result = await context.runtime.next(context.outputDir, jobId, {
     count,
   });
   return result.assignments as Lease[];
@@ -248,7 +248,7 @@ describe("AgentJobsRuntime", () => {
     });
 
     const prepared = await prepare(context);
-    const leases = await nextLeases(context, prepared.invocation_id, 2);
+    const leases = await nextLeases(context, prepared.job_id, 2);
     expect(leases.map(({ id }) => id)).toEqual(["0", "-42"]);
     const assignments = await Promise.all(
       leases.map(({ handle }) => context.runtime.getAssignment(handle)),
@@ -265,7 +265,7 @@ describe("AgentJobsRuntime", () => {
         '[{"id":9223372036854775807,"title":"Visible","secret":"hidden"}]\n',
     });
     const prepared = await prepare(context);
-    const [lease] = await nextLeases(context, prepared.invocation_id);
+    const [lease] = await nextLeases(context, prepared.job_id);
 
     expect(lease).toMatchObject({ id: "9223372036854775807" });
     expect(Object.keys(lease ?? {})).toEqual(["id", "handle"]);
@@ -301,21 +301,26 @@ describe("AgentJobsRuntime", () => {
     expect(prepared.output_dir).toBe(expectedOutput);
     const pointer = (await readStrict(
       join(expectedOutput, ".batch", "current.json"),
-    )) as { state_path: string };
-    expect(pointer.state_path.startsWith(`${expectedOutput}/.batch/`)).toBe(true);
+    )) as { job_id: string; state_path: string };
+    expect(pointer.job_id).toBe(prepared.job_id);
+    expect(pointer.state_path.startsWith(`${expectedOutput}/.batch/jobs/`)).toBe(
+      true,
+    );
     const state = (await readStrict(pointer.state_path)) as {
+      job_id: string;
       output_dir: string;
     };
+    expect(state.job_id).toBe(prepared.job_id);
     expect(state.output_dir).toBe(expectedOutput);
 
     const issued = await context.runtime.next(
       lexicalOutput,
-      prepared.invocation_id,
+      prepared.job_id,
     );
     const [lease] = issued.assignments as Lease[];
     await complete(context, lease!);
     await expect(
-      context.runtime.status(lexicalOutput, prepared.invocation_id),
+      context.runtime.status(lexicalOutput, prepared.job_id),
     ).resolves.toMatchObject({ counts: { completed: 1 } });
     expect(await readStrict(join(expectedOutput, "runs", "one.json"))).toEqual(
       result("one"),
@@ -333,7 +338,7 @@ describe("AgentJobsRuntime", () => {
       },
     });
     const prepared = await prepare(context, { idColumnKey: "row_key" });
-    const [lease] = await nextLeases(context, prepared.invocation_id);
+    const [lease] = await nextLeases(context, prepared.job_id);
     const assignment = await context.runtime.getAssignment(lease!.handle);
 
     expect(assignment).not.toHaveProperty("id");
@@ -364,7 +369,7 @@ describe("AgentJobsRuntime", () => {
       },
     });
     const prepared = await prepare(context);
-    const [lease] = await nextLeases(context, prepared.invocation_id);
+    const [lease] = await nextLeases(context, prepared.job_id);
     const assignment = await context.runtime.getAssignment(lease!.handle);
     const input = assignment.input as Record<string, unknown>;
     expect(Object.hasOwn(input, "__proto__")).toBe(true);
@@ -378,7 +383,7 @@ describe("AgentJobsRuntime", () => {
     await context.runtime.submitResult(lease!.handle, output);
     const collected = await context.runtime.collect(
       context.outputDir,
-      prepared.invocation_id,
+      prepared.job_id,
       { format: "json" },
     );
     const [record] = (await readStrict(collected.path as string)) as Array<
@@ -393,7 +398,7 @@ describe("AgentJobsRuntime", () => {
     ).toBeUndefined();
   });
 
-  it("enforces the invocation concurrency cap", async () => {
+  it("enforces the agent job concurrency cap", async () => {
     const context = await fixture({
       rows: Array.from({ length: 5 }, (_, index) => ({
         id: `row-${index}`,
@@ -401,22 +406,22 @@ describe("AgentJobsRuntime", () => {
       })),
     });
     const prepared = await prepare(context, { maxConcurrency: 2 });
-    const first = await nextLeases(context, prepared.invocation_id, 99);
+    const first = await nextLeases(context, prepared.job_id, 99);
     expect(first).toHaveLength(2);
-    await expect(nextLeases(context, prepared.invocation_id, 99)).resolves.toEqual(
+    await expect(nextLeases(context, prepared.job_id, 99)).resolves.toEqual(
       [],
     );
 
     await complete(context, first[0]!);
     await expect(
-      nextLeases(context, prepared.invocation_id, 99),
+      nextLeases(context, prepared.job_id, 99),
     ).resolves.toHaveLength(1);
   });
 
   it("validates results and uses no-clobber atomic publication", async () => {
     const context = await fixture();
     const prepared = await prepare(context);
-    const [lease] = await nextLeases(context, prepared.invocation_id);
+    const [lease] = await nextLeases(context, prepared.job_id);
     await context.runtime.getAssignment(lease!.handle);
 
     await expect(
@@ -438,7 +443,7 @@ describe("AgentJobsRuntime", () => {
   it("reconciles a result committed before an interrupted state update", async () => {
     const context = await fixture();
     const prepared = await prepare(context);
-    const [lease] = await nextLeases(context, prepared.invocation_id);
+    const [lease] = await nextLeases(context, prepared.job_id);
     await context.runtime.getAssignment(lease!.handle);
     await atomicWriteJson(
       join(context.outputDir, "runs", "one.json"),
@@ -448,7 +453,7 @@ describe("AgentJobsRuntime", () => {
 
     const status = await context.runtime.status(
       context.outputDir,
-      prepared.invocation_id,
+      prepared.job_id,
     );
     expect(status.counts).toMatchObject({ completed: 1, active: 0 });
     await expect(
@@ -459,14 +464,14 @@ describe("AgentJobsRuntime", () => {
   it("lets a valid commit win when failure is reported before submit updates state", async () => {
     const context = await fixture();
     const prepared = await prepare(context, { maxRetries: 0 });
-    const [lease] = await nextLeases(context, prepared.invocation_id);
+    const [lease] = await nextLeases(context, prepared.job_id);
     await context.runtime.getAssignment(lease!.handle);
     await atomicWriteJson(
       join(context.outputDir, "runs", "one.json"),
       result("committed"),
       { noClobber: true },
     );
-    // A stale error can be left by an older invocation using the same output.
+    // A stale error can be left by an older agent job using the same output.
     await atomicWriteJson(join(context.outputDir, "errors", "one.json"), {
       code: "stale",
     });
@@ -483,7 +488,7 @@ describe("AgentJobsRuntime", () => {
       reconciled: true,
     });
     await expect(
-      context.runtime.status(context.outputDir, prepared.invocation_id),
+      context.runtime.status(context.outputDir, prepared.job_id),
     ).resolves.toMatchObject({
       counts: { completed: 1, failed: 0, active: 0 },
     });
@@ -498,7 +503,7 @@ describe("AgentJobsRuntime", () => {
   it("converges a terminal failure to completed when a valid run arrives late", async () => {
     const context = await fixture();
     const prepared = await prepare(context, { maxRetries: 0 });
-    const [lease] = await nextLeases(context, prepared.invocation_id);
+    const [lease] = await nextLeases(context, prepared.job_id);
     await context.runtime.getAssignment(lease!.handle);
     await expect(
       context.runtime.reportFailure(lease!.handle, "worker_exit", "timed out"),
@@ -510,14 +515,14 @@ describe("AgentJobsRuntime", () => {
     );
 
     await expect(
-      context.runtime.validate(context.outputDir, prepared.invocation_id),
+      context.runtime.validate(context.outputDir, prepared.job_id),
     ).resolves.toMatchObject({
       valid: true,
       counts: { valid: 1, failed: 0, missing: 0 },
     });
     const status = await context.runtime.status(
       context.outputDir,
-      prepared.invocation_id,
+      prepared.job_id,
     );
     expect(status).toMatchObject({ counts: { completed: 1, failed: 0 } });
     expect(status.rows).toEqual([
@@ -531,13 +536,13 @@ describe("AgentJobsRuntime", () => {
   it("issues one fresh retry and then writes a structured terminal error", async () => {
     const context = await fixture();
     const prepared = await prepare(context, { maxRetries: 1 });
-    const [first] = await nextLeases(context, prepared.invocation_id);
+    const [first] = await nextLeases(context, prepared.job_id);
     await context.runtime.getAssignment(first!.handle);
     await expect(
       context.runtime.reportFailure(first!.handle, "worker_error", "first"),
     ).resolves.toMatchObject({ terminal: false, status: "pending", attempts: 1 });
 
-    const [second] = await nextLeases(context, prepared.invocation_id);
+    const [second] = await nextLeases(context, prepared.job_id);
     expect(second!.handle).not.toBe(first!.handle);
     await context.runtime.getAssignment(second!.handle);
     await expect(
@@ -559,11 +564,11 @@ describe("AgentJobsRuntime", () => {
     const first = await prepare(skipped);
     expect(first.counts).toMatchObject({ skipped_invalid: 1, pending: 0 });
     await expect(
-      nextLeases(skipped, first.invocation_id, 10),
+      nextLeases(skipped, first.job_id, 10),
     ).resolves.toEqual([]);
     const validation = await skipped.runtime.validate(
       skipped.outputDir,
-      first.invocation_id,
+      first.job_id,
     );
     expect(validation).toMatchObject({ valid: false });
 
@@ -593,7 +598,7 @@ describe("AgentJobsRuntime", () => {
     ).toEqual({ invalid: true });
   });
 
-  it("resumes a new invocation strictly from committed outputs", async () => {
+  it("resumes a new agent job strictly from committed outputs", async () => {
     const context = await fixture({
       rows: [
         { id: "done", title: "Done" },
@@ -601,13 +606,13 @@ describe("AgentJobsRuntime", () => {
       ],
     });
     const first = await prepare(context);
-    const [lease] = await nextLeases(context, first.invocation_id);
+    const [lease] = await nextLeases(context, first.job_id);
     await complete(context, lease!);
 
     const resumed = await prepare(context);
-    expect(resumed.invocation_id).not.toBe(first.invocation_id);
+    expect(resumed.job_id).not.toBe(first.job_id);
     expect(resumed.counts).toMatchObject({ skipped_valid: 1, pending: 1 });
-    expect(await nextLeases(context, resumed.invocation_id, 10)).toMatchObject([
+    expect(await nextLeases(context, resumed.job_id, 10)).toMatchObject([
       { id: "remaining" },
     ]);
   });
@@ -618,13 +623,13 @@ describe("AgentJobsRuntime", () => {
       rows: ids.map((id) => ({ id, title: id })),
     });
     const prepared = await prepare(context);
-    const leases = await nextLeases(context, prepared.invocation_id, 3);
+    const leases = await nextLeases(context, prepared.job_id, 3);
     for (const lease of leases.toReversed()) {
       await complete(context, lease, result(lease.id, true));
     }
     const collected = await context.runtime.collect(
       context.outputDir,
-      prepared.invocation_id,
+      prepared.job_id,
       { format: "json" },
     );
     const records = (await readStrict(collected.path as string)) as Array<{
@@ -650,13 +655,13 @@ describe("AgentJobsRuntime", () => {
       ],
     });
     const prepared = await prepare(context);
-    for (const lease of await nextLeases(context, prepared.invocation_id, 2)) {
+    for (const lease of await nextLeases(context, prepared.job_id, 2)) {
       await complete(context, lease, result(lease.id, true));
     }
 
     const jsonl = await context.runtime.collect(
       context.outputDir,
-      prepared.invocation_id,
+      prepared.job_id,
       { format: "jsonl" },
     );
     const lines = (await readFile(jsonl.path as string, "utf8"))
@@ -667,7 +672,7 @@ describe("AgentJobsRuntime", () => {
 
     const csv = await context.runtime.collect(
       context.outputDir,
-      prepared.invocation_id,
+      prepared.job_id,
       { format: "csv" },
     );
     const csvText = await readFile(csv.path as string, "utf8");
@@ -675,7 +680,7 @@ describe("AgentJobsRuntime", () => {
     expect(csvText).toContain('"{""score"":3}"');
 
     await expect(
-      context.runtime.collect(context.outputDir, prepared.invocation_id, {
+      context.runtime.collect(context.outputDir, prepared.job_id, {
         format: "none",
       }),
     ).resolves.toMatchObject({ path: null, count: 2 });
@@ -689,7 +694,7 @@ describe("AgentJobsRuntime", () => {
       ],
     });
     const stopped = await prepare(context, { maxRetries: 0 });
-    const [ok, bad] = await nextLeases(context, stopped.invocation_id, 2);
+    const [ok, bad] = await nextLeases(context, stopped.job_id, 2);
     await complete(context, ok!);
     await context.runtime.reportFailure(
       bad!.handle,
@@ -697,7 +702,7 @@ describe("AgentJobsRuntime", () => {
       "no result",
     );
     await expect(
-      context.runtime.collect(context.outputDir, stopped.invocation_id, {
+      context.runtime.collect(context.outputDir, stopped.job_id, {
         format: "json",
       }),
     ).rejects.toMatchObject({ code: "batch_failed" });
@@ -714,7 +719,7 @@ describe("AgentJobsRuntime", () => {
     });
     const [partialOk, partialBad] = await nextLeases(
       continuing,
-      partial.invocation_id,
+      partial.job_id,
       2,
     );
     await complete(continuing, partialOk!);
@@ -725,7 +730,7 @@ describe("AgentJobsRuntime", () => {
     );
     const collected = await continuing.runtime.collect(
       continuing.outputDir,
-      partial.invocation_id,
+      partial.job_id,
       { format: "json" },
     );
     expect(collected).toMatchObject({ count: 1, partial: true });
@@ -782,7 +787,7 @@ describe("AgentJobsRuntime", () => {
     const prepared = await prepare(registryContext);
     const [lease] = await nextLeases(
       registryContext,
-      prepared.invocation_id,
+      prepared.job_id,
     );
     const registryPath = join(
       registryContext.root,

@@ -107,8 +107,8 @@ Return one summary string.
     'next',
     '--output-dir',
     outputDir,
-    '--invocation-id',
-    prepared.invocation_id,
+    '--job-id',
+    prepared.job_id,
     '--count',
     '3',
   );
@@ -160,8 +160,8 @@ Return one summary string.
     'validate',
     '--output-dir',
     outputDir,
-    '--invocation-id',
-    prepared.invocation_id,
+    '--job-id',
+    prepared.job_id,
   );
   assert.equal(validated.valid, true);
   const collected = await cli(
@@ -170,8 +170,8 @@ Return one summary string.
     'collect',
     '--output-dir',
     outputDir,
-    '--invocation-id',
-    prepared.invocation_id,
+    '--job-id',
+    prepared.job_id,
     '--format',
     'json',
   );

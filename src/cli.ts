@@ -48,9 +48,9 @@ export interface ProcessCliDependencies extends CliDependencies {
   exit?: (code: number) => void;
 }
 
-interface InvocationArguments {
+interface JobArguments {
   outputDir: string;
-  invocationId: string;
+  jobId: string;
 }
 
 const HELP = `Usage: agent-jobs <command> [options]
@@ -142,14 +142,14 @@ function parseStrict(
   }
 }
 
-function parseInvocationArguments(args: readonly string[]): InvocationArguments {
+function parseJobArguments(args: readonly string[]): JobArguments {
   const values = parseStrict(args, {
     'output-dir': { type: 'string' },
-    'invocation-id': { type: 'string' },
+    'job-id': { type: 'string' },
   });
   return {
     outputDir: requiredString(values, 'output-dir'),
-    invocationId: requiredString(values, 'invocation-id'),
+    jobId: requiredString(values, 'job-id'),
   };
 }
 
@@ -210,31 +210,31 @@ async function dispatch(
   if (command === 'next') {
     const values = parseStrict(args, {
       'output-dir': { type: 'string' },
-      'invocation-id': { type: 'string' },
+      'job-id': { type: 'string' },
       count: { type: 'string' },
     });
     const count = optionalInteger(values, 'count') ?? 1;
     return runtime.next(
       requiredString(values, 'output-dir'),
-      requiredString(values, 'invocation-id'),
+      requiredString(values, 'job-id'),
       { count },
     );
   }
 
   if (command === 'status') {
-    const invocation = parseInvocationArguments(args);
-    return runtime.status(invocation.outputDir, invocation.invocationId);
+    const job = parseJobArguments(args);
+    return runtime.status(job.outputDir, job.jobId);
   }
 
   if (command === 'validate') {
-    const invocation = parseInvocationArguments(args);
-    return runtime.validate(invocation.outputDir, invocation.invocationId);
+    const job = parseJobArguments(args);
+    return runtime.validate(job.outputDir, job.jobId);
   }
 
   if (command === 'collect') {
     const values = parseStrict(args, {
       'output-dir': { type: 'string' },
-      'invocation-id': { type: 'string' },
+      'job-id': { type: 'string' },
       format: { type: 'string' },
     });
     const format = assertChoice(
@@ -244,7 +244,7 @@ async function dispatch(
     );
     return runtime.collect(
       requiredString(values, 'output-dir'),
-      requiredString(values, 'invocation-id'),
+      requiredString(values, 'job-id'),
       { format },
     );
   }

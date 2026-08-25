@@ -38,7 +38,7 @@ import {
 export const STATE_VERSION = 1;
 const HANDLE_PREFIX = "aj_";
 const HANDLE_PATTERN = /^aj_[A-Za-z0-9_-]{32,}$/;
-const INVOCATION_PATTERN = /^[0-9a-f]{32}$/;
+const JOB_ID_PATTERN = /^[0-9a-f]{32}$/;
 const ACTIVE_STATUSES = new Set<RecordStatus>(["leased", "running"]);
 const TERMINAL_STATUSES = new Set<RecordStatus>([
   "completed",
@@ -110,7 +110,7 @@ interface FailureRecord extends JsonObject {
   failed_at: string;
 }
 
-interface InvocationRecord extends JsonObject {
+interface AgentJobItemRecord extends JsonObject {
   index: number;
   id: string;
   safe_id: string;
@@ -137,9 +137,9 @@ interface SerializedSpec extends JsonObject {
   output_field_order: string[];
 }
 
-interface InvocationState extends JsonObject {
+interface AgentJobState extends JsonObject {
   state_version: number;
-  invocation_id: string;
+  job_id: string;
   created_at: string;
   updated_at: string;
   input_data: string;
@@ -149,14 +149,14 @@ interface InvocationState extends JsonObject {
   records_path: string | null;
   spec: SerializedSpec;
   settings: ResolvedSettings;
-  records: InvocationRecord[];
+  records: AgentJobItemRecord[];
   cache_diagnostics: JsonObject[];
 }
 
 interface RegistryEntry extends JsonObject {
   state_version: number;
   state_path: string;
-  invocation_id: string;
+  job_id: string;
   record_index: number;
   handle: string;
 }
@@ -176,7 +176,7 @@ export interface QueueCounts extends JsonObject {
 
 /**
  * Coordinate durable row assignments while keeping complete row data out of the
- * parent conversation. All mutating operations are serialized per invocation.
+ * parent conversation. All mutating operations are serialized per agent job.
  */
 export class AgentJobsRuntime {
   public readonly registryDir: string;
@@ -202,7 +202,7 @@ export class AgentJobsRuntime {
     this.registryDir = absolutePath(configured);
   }
 
-  /** Validate every row before creating any durable invocation or lease. */
+  /** Validate every row before creating any durable agent job or lease. */
   public async prepare(options: PrepareOptions): Promise<JsonObject> {
     const maxRetries = options.maxRetries ?? 1;
     const retryInvalid = options.retryInvalid ?? false;
@@ -240,17 +240,17 @@ export class AgentJobsRuntime {
     // A prompt-level model override intentionally clears a spec-level effort.
     const resolvedEffort =
       reasoningEffort ?? (model !== null ? null : (spec.reasoningEffort ?? null));
-    const invocationId = randomUUID().replaceAll("-", "");
+    const jobId = randomUUID().replaceAll("-", "");
     const destination = await canonicalPath(options.outputDir);
     const runsDir = join(destination, "runs");
-    const invocationsDir = join(destination, ".batch", "invocations");
+    const jobsDir = join(destination, ".batch", "jobs");
 
     await ensureOutputLayout(destination, true);
     const archiveRoot = join(
       destination,
       "history",
       "invalid",
-      `${archiveStamp()}-${invocationId}`,
+      `${archiveStamp()}-${jobId}`,
     );
     const cacheDiagnostics: JsonObject[] = [];
 
@@ -289,9 +289,9 @@ export class AgentJobsRuntime {
       post_process_model: postProcessModel,
       post_process_reasoning_effort: postProcessReasoningEffort,
     };
-    const state: InvocationState = {
+    const state: AgentJobState = {
       state_version: STATE_VERSION,
-      invocation_id: invocationId,
+      job_id: jobId,
       created_at: timestamp,
       updated_at: timestamp,
       input_data: absolutePath(options.inputData),
@@ -304,18 +304,18 @@ export class AgentJobsRuntime {
       records: preparedRows,
       cache_diagnostics: cacheDiagnostics,
     };
-    const statePath = join(invocationsDir, `${invocationId}.json`);
+    const statePath = join(jobsDir, `${jobId}.json`);
     await ensureOutputLayout(destination, false);
     await atomicWriteJson(statePath, state, { noClobber: true });
     await ensureOutputLayout(destination, false);
     await atomicWriteJson(join(destination, ".batch", "current.json"), {
-      invocation_id: invocationId,
+      job_id: jobId,
       state_path: statePath,
     });
 
     return {
       ok: true,
-      invocation_id: invocationId,
+      job_id: jobId,
       output_dir: destination,
       counts: counts(state),
       worker: {
@@ -334,7 +334,7 @@ export class AgentJobsRuntime {
   /** Lease pending rows, returning only canonical IDs and opaque handles. */
   public async next(
     outputDir: PathInput,
-    invocationId: string | null = null,
+    jobId: string | null = null,
     options: { count?: number } = {},
   ): Promise<JsonObject> {
     const requested = options.count ?? 1;
@@ -344,7 +344,7 @@ export class AgentJobsRuntime {
         "count must be a positive integer",
       );
     }
-    const statePath = await this.statePath(outputDir, invocationId);
+    const statePath = await this.statePath(outputDir, jobId);
 
     return await withLock(lockPath(statePath), async () => {
       const state = await this.readState(statePath);
@@ -372,7 +372,7 @@ export class AgentJobsRuntime {
         const registry: RegistryEntry = {
           state_version: STATE_VERSION,
           state_path: statePath,
-          invocation_id: state.invocation_id,
+          job_id: state.job_id,
           record_index: record.index,
           handle,
         };
@@ -385,7 +385,7 @@ export class AgentJobsRuntime {
       await this.saveState(statePath, state);
       return {
         ok: true,
-        invocation_id: state.invocation_id,
+        job_id: state.job_id,
         assignments,
         counts: counts(state),
       };
@@ -598,9 +598,9 @@ export class AgentJobsRuntime {
   /** Return queue state without exposing row input or output values. */
   public async status(
     outputDir: PathInput,
-    invocationId: string | null = null,
+    jobId: string | null = null,
   ): Promise<JsonObject> {
-    const statePath = await this.statePath(outputDir, invocationId);
+    const statePath = await this.statePath(outputDir, jobId);
     return await withLock(lockPath(statePath), async () => {
       const state = await this.readState(statePath);
       await ensureStateOutputLayout(state);
@@ -609,7 +609,7 @@ export class AgentJobsRuntime {
       }
       return {
         ok: true,
-        invocation_id: state.invocation_id,
+        job_id: state.job_id,
         output_dir: state.output_dir,
         counts: counts(state),
         rows: state.records.map((record) => ({
@@ -627,9 +627,9 @@ export class AgentJobsRuntime {
   /** Validate every expected run and persist the final report. */
   public async validate(
     outputDir: PathInput,
-    invocationId: string | null = null,
+    jobId: string | null = null,
   ): Promise<JsonObject> {
-    const statePath = await this.statePath(outputDir, invocationId);
+    const statePath = await this.statePath(outputDir, jobId);
     return await withLock(lockPath(statePath), async () => {
       const state = await this.readState(statePath);
       await ensureStateOutputLayout(state);
@@ -646,10 +646,10 @@ export class AgentJobsRuntime {
   /** Collect valid results in input order into one deterministic artifact. */
   public async collect(
     outputDir: PathInput,
-    invocationId: string | null = null,
+    jobId: string | null = null,
     options: { format?: CollectFormat | null } = {},
   ): Promise<JsonObject> {
-    const statePath = await this.statePath(outputDir, invocationId);
+    const statePath = await this.statePath(outputDir, jobId);
     return await withLock(lockPath(statePath), async () => {
       const state = await this.readState(statePath);
       await ensureStateOutputLayout(state);
@@ -678,7 +678,7 @@ export class AgentJobsRuntime {
       if (selectedFormat === "none") {
         return {
           ok: true,
-          invocation_id: state.invocation_id,
+          job_id: state.job_id,
           format: "none",
           path: null,
           count: records.length,
@@ -699,7 +699,7 @@ export class AgentJobsRuntime {
       );
       return {
         ok: true,
-        invocation_id: state.invocation_id,
+        job_id: state.job_id,
         format: selectedFormat,
         path: collectionPath,
         count: records.length,
@@ -951,8 +951,8 @@ export class AgentJobsRuntime {
     rows: JsonObject[],
     spec: TaskSpec,
     idColumnKey: string,
-  ): InvocationRecord[] {
-    const prepared: InvocationRecord[] = [];
+  ): AgentJobItemRecord[] {
+    const prepared: AgentJobItemRecord[] = [];
     const diagnostics: JsonObject[] = [];
     const duplicateDiagnostics: JsonObject[] = [];
     const identifiers = new Map<string, number>();
@@ -1140,62 +1140,62 @@ export class AgentJobsRuntime {
 
   private async statePath(
     outputDir: PathInput,
-    invocationId: string | null,
+    jobId: string | null,
   ): Promise<string> {
     const destination = await canonicalPath(outputDir);
     await ensureOutputLayout(destination, false);
-    let selected: unknown = invocationId;
+    let selected: unknown = jobId;
     if (selected === null) {
       const pointerPath = join(destination, ".batch", "current.json");
       if (!(await managedFileExists(pointerPath))) {
         throw new AgentJobsError(
-          "invocation_not_found",
-          `No current invocation exists in ${destination}`,
+          "job_not_found",
+          `No current agent job exists in ${destination}`,
         );
       }
       const pointer = await readJson(pointerPath);
-      selected = isObject(pointer) ? pointer.invocation_id : null;
+      selected = isObject(pointer) ? pointer.job_id : null;
     }
-    if (typeof selected !== "string" || !INVOCATION_PATTERN.test(selected)) {
+    if (typeof selected !== "string" || !JOB_ID_PATTERN.test(selected)) {
       throw new AgentJobsError(
-        "invalid_invocation_id",
-        "Invalid invocation ID",
+        "invalid_job_id",
+        "Invalid job ID",
       );
     }
     const path = join(
       destination,
       ".batch",
-      "invocations",
+      "jobs",
       `${selected}.json`,
     );
     if (!(await managedFileExists(path))) {
       throw new AgentJobsError(
-        "invocation_not_found",
-        `Invocation does not exist: ${selected}`,
+        "job_not_found",
+        `Agent job does not exist: ${selected}`,
         { path },
       );
     }
     return path;
   }
 
-  private async readState(path: string): Promise<InvocationState> {
+  private async readState(path: string): Promise<AgentJobState> {
     const value = await readJson(path);
     if (!isObject(value) || value.state_version !== STATE_VERSION) {
       throw new AgentJobsError(
-        "invalid_invocation",
-        "Invocation state is missing or incompatible",
+        "invalid_job",
+        "Agent job state is missing or incompatible",
       );
     }
     if (!Array.isArray(value.records)) {
       throw new AgentJobsError(
-        "invalid_invocation",
-        "Invocation records are invalid",
+        "invalid_job",
+        "Agent job items are invalid",
       );
     }
-    return value as unknown as InvocationState;
+    return value as unknown as AgentJobState;
   }
 
-  private async saveState(path: string, state: InvocationState): Promise<void> {
+  private async saveState(path: string, state: AgentJobState): Promise<void> {
     state.updated_at = now();
     await atomicWriteJson(path, state);
   }
@@ -1244,13 +1244,13 @@ export class AgentJobsRuntime {
 
   private async registryStatePath(registry: RegistryEntry): Promise<string> {
     const statePath = registry.state_path;
-    const invocationId = registry.invocation_id;
+    const jobId = registry.job_id;
     if (
       !isAbsolute(statePath) ||
-      typeof invocationId !== "string" ||
-      !INVOCATION_PATTERN.test(invocationId) ||
-      basename(statePath) !== `${invocationId}.json` ||
-      basename(dirname(statePath)) !== "invocations" ||
+      typeof jobId !== "string" ||
+      !JOB_ID_PATTERN.test(jobId) ||
+      basename(statePath) !== `${jobId}.json` ||
+      basename(dirname(statePath)) !== "jobs" ||
       basename(dirname(dirname(statePath))) !== ".batch"
     ) {
       throw new AgentJobsError(
@@ -1262,8 +1262,8 @@ export class AgentJobsRuntime {
     const expected = join(
       destination,
       ".batch",
-      "invocations",
-      `${invocationId}.json`,
+      "jobs",
+      `${jobId}.json`,
     );
     if (statePath !== expected) {
       throw new AgentJobsError(
@@ -1293,7 +1293,7 @@ export class AgentJobsRuntime {
   }
 
   private async reconcileCommittedRuns(
-    state: InvocationState,
+    state: AgentJobState,
   ): Promise<boolean> {
     let changed = false;
     for (const record of state.records) {
@@ -1331,7 +1331,7 @@ export class AgentJobsRuntime {
   }
 
   private async buildValidationReport(
-    state: InvocationState,
+    state: AgentJobState,
   ): Promise<ValidationReport> {
     const results: JsonObject[] = [];
     const errors: JsonObject[] = [];
@@ -1377,7 +1377,7 @@ export class AgentJobsRuntime {
       }
     }
     return {
-      invocation_id: state.invocation_id,
+      job_id: state.job_id,
       generated_at: now(),
       valid: errors.length === 0,
       counts: {
@@ -1394,7 +1394,7 @@ export class AgentJobsRuntime {
   }
 
   private async validCollectedRecords(
-    state: InvocationState,
+    state: AgentJobState,
   ): Promise<JsonObject[]> {
     const collected: JsonObject[] = [];
     for (const record of state.records) {
@@ -1420,7 +1420,7 @@ export class AgentJobsRuntime {
 }
 
 interface ValidationReport extends JsonObject {
-  invocation_id: string;
+  job_id: string;
   generated_at: string;
   valid: boolean;
   counts: JsonObject;
@@ -1446,14 +1446,14 @@ function schemaProperties(schema: JsonSchema): JsonObject {
 }
 
 function recordForRegistry(
-  state: InvocationState,
+  state: AgentJobState,
   registry: RegistryEntry,
   handle: string,
-): InvocationRecord {
-  if (state.invocation_id !== registry.invocation_id) {
+): AgentJobItemRecord {
+  if (state.job_id !== registry.job_id) {
     throw new AgentJobsError(
       "invalid_handle",
-      "Handle invocation does not match",
+      "Handle agent job does not match",
     );
   }
   const index = registry.record_index;
@@ -1470,7 +1470,7 @@ function recordForRegistry(
   return record;
 }
 
-function counts(state: InvocationState): QueueCounts {
+function counts(state: AgentJobState): QueueCounts {
   const statuses = new Map<RecordStatus, number>();
   for (const record of state.records) {
     statuses.set(record.status, (statuses.get(record.status) ?? 0) + 1);
@@ -1494,15 +1494,15 @@ function counts(state: InvocationState): QueueCounts {
 }
 
 function runPathFor(
-  state: InvocationState,
-  record: InvocationRecord,
+  state: AgentJobState,
+  record: AgentJobItemRecord,
 ): string {
   return join(state.output_dir, "runs", `${record.safe_id}.json`);
 }
 
 function errorPathFor(
-  state: InvocationState,
-  record: InvocationRecord,
+  state: AgentJobState,
+  record: AgentJobItemRecord,
 ): string {
   return join(state.output_dir, "errors", `${record.safe_id}.json`);
 }
@@ -1586,22 +1586,22 @@ async function ensureOutputLayout(
   create: boolean,
 ): Promise<void> {
   await ensureRealDirectory(destination, create, create);
-  for (const relative of ["runs", "errors", ".batch", ".batch/invocations"]) {
+  for (const relative of ["runs", "errors", ".batch", ".batch/jobs"]) {
     await ensureRealDirectory(join(destination, relative), create, false);
   }
 }
 
-async function ensureStateOutputLayout(state: InvocationState): Promise<void> {
+async function ensureStateOutputLayout(state: AgentJobState): Promise<void> {
   if (typeof state.output_dir !== "string" || state.output_dir.length === 0) {
     throw new AgentJobsError(
-      "invalid_invocation",
-      "Invocation output_dir is missing or invalid",
+      "invalid_job",
+      "Agent job output_dir is missing or invalid",
     );
   }
   if (!isAbsolute(state.output_dir)) {
     throw new AgentJobsError(
-      "invalid_invocation",
-      "Invocation output_dir must be absolute",
+      "invalid_job",
+      "Agent job output_dir must be absolute",
     );
   }
   await ensureOutputLayout(state.output_dir, false);

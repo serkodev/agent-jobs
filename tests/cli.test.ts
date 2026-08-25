@@ -24,7 +24,7 @@ function captureStream(): {
 
 function fakeRuntime(overrides: Partial<AgentJobsRuntime> = {}): AgentJobsRuntime {
   return {
-    prepare: vi.fn().mockResolvedValue({ invocation_id: 'invocation' }),
+    prepare: vi.fn().mockResolvedValue({ job_id: 'job' }),
     next: vi.fn().mockResolvedValue({ assignments: [] }),
     status: vi.fn().mockResolvedValue({ counts: { pending: 0 } }),
     validate: vi.fn().mockResolvedValue({ valid: true }),
@@ -76,11 +76,11 @@ describe('runCli', () => {
     });
     expect(JSON.parse(stdout.read())).toEqual({
       ok: true,
-      invocation_id: 'invocation',
+      job_id: 'job',
     });
   });
 
-  it('dispatches invocation commands with the stable argument order', async () => {
+  it('dispatches job commands with the stable argument order', async () => {
     const runtime = fakeRuntime();
     const stdout = captureStream();
 
@@ -90,7 +90,7 @@ describe('runCli', () => {
           'next',
           '--output-dir',
           'output',
-          '--invocation-id',
+          '--job-id',
           'abc',
           '--count',
           '3',
@@ -196,7 +196,7 @@ describe('runCli', () => {
     const signals = new EventEmitter();
     const exit = vi.fn();
     const running = runProcessCli(
-      ['status', '--output-dir', 'output', '--invocation-id', 'abc'],
+      ['status', '--output-dir', 'output', '--job-id', 'abc'],
       {
         runtime,
         stdout: stdout.stream,

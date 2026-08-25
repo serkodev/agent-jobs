@@ -43,7 +43,7 @@ Run, adding only flags represented by optional markers:
 ```
 
 Pass every value as a separately quoted argument. If prepare returns `ok: false`,
-report its diagnostics and stop. Otherwise retain the invocation ID, resolved worker
+report its diagnostics and stop. Otherwise retain the job ID, resolved worker
 and postprocessor settings, concurrency cap, error policy, and collection format.
 Never independently read or revalidate the full input or task specification.
 
@@ -52,7 +52,7 @@ Never independently read or revalidate the full input or task specification.
 Request only the currently available capacity:
 
 ```text
-{{AGENT_JOBS_CLI}} next --output-dir <OUTPUT_DIR> --invocation-id <ID> --count <N>
+{{AGENT_JOBS_CLI}} next --output-dir <OUTPUT_DIR> --job-id <ID> --count <N>
 ```
 
 {{WORKER_ORCHESTRATION}}
@@ -76,7 +76,7 @@ there are no pending or active records.
 Always run:
 
 ```text
-{{AGENT_JOBS_CLI}} validate --output-dir <OUTPUT_DIR> --invocation-id <ID>
+{{AGENT_JOBS_CLI}} validate --output-dir <OUTPUT_DIR> --job-id <ID>
 ```
 
 With `ON_ERROR: stop`, validation errors prevent collection and post-processing.
@@ -84,7 +84,7 @@ With `continue_successes`, collection may contain only successful valid rows. Un
 the resolved format is `none`, run:
 
 ```text
-{{AGENT_JOBS_CLI}} collect --output-dir <OUTPUT_DIR> --invocation-id <ID> --format <FORMAT>
+{{AGENT_JOBS_CLI}} collect --output-dir <OUTPUT_DIR> --job-id <ID> --format <FORMAT>
 ```
 
 If marker-free prose requests synthesis, start one fresh `agent_job_postprocessor` only

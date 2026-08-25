@@ -5,6 +5,11 @@
 canonical ID 與 opaque assignment handle，worker 再透過本地 stdio MCP 取得唯一一筆
 資料並 atomic commit 結果。
 
+命名沿用 OpenAI 舊 `spawn_agents_on_csv` 實作中的
+[`AgentJob`](https://github.com/openai/codex/blob/81e89fa5af13012c8313f032a17b11b9a5170d33/codex-rs/state/src/model/agent_job.rs)
+概念：一個 agent job 是一次完整 batch execution；`TASK_SPEC` 是可重用的每筆工作
+定義；assignment 則是 job 中交給單一 fresh worker 的一筆 opaque lease。
+
 ## 安裝
 
 使用者只需要 Node.js 20.6+。本階段先用本機 tarball 驗證，不 publish 到 npm：
@@ -143,7 +148,7 @@ OUTPUT_DIR/
   errors/<safe-id>.json
   history/invalid/...
   report.json
-  .batch/invocations/...
+  .batch/jobs/...
 ```
 
 `runs/<safe-id>.json` 是純 task output。只要該 path 已存在，resume 就會無條件 skip；
@@ -166,7 +171,7 @@ lock，owner crash 時可回收。若無法在 30 秒內取得，會回報含 ow
 `lock_timeout`，而不會以不安全的 age-based steal 強行繼續。
 若回收 lock 的 process 本身在極窄的 recovery window 內 crash，它留下的
 recovery claim 也不會被其他 waiter 強行偷走；重新送出原 prompt 執行 `prepare`
-會產生新 invocation，並依既有 `runs/` 繼續，不需要破壞性地刪除 lock。
+會產生新 agent job，並依既有 `runs/` 繼續，不需要破壞性地刪除 lock。
 
 Handle registry 預設位於目標專案 root 的 `.agent-jobs/handles/`；
 可在啟動 Codex 前用 `AGENT_JOBS_REGISTRY_DIR` override，確保 parent CLI 與 MCP process
@@ -188,10 +193,10 @@ pnpm --silent agent-jobs prepare \
   --id-column-key id \
   --output-dir /path/to/output
 
-pnpm --silent agent-jobs next --output-dir /path/to/output --invocation-id <id> --count 4
-pnpm --silent agent-jobs status --output-dir /path/to/output --invocation-id <id>
-pnpm --silent agent-jobs validate --output-dir /path/to/output --invocation-id <id>
-pnpm --silent agent-jobs collect --output-dir /path/to/output --invocation-id <id> --format json
+pnpm --silent agent-jobs next --output-dir /path/to/output --job-id <id> --count 4
+pnpm --silent agent-jobs status --output-dir /path/to/output --job-id <id>
+pnpm --silent agent-jobs validate --output-dir /path/to/output --job-id <id>
+pnpm --silent agent-jobs collect --output-dir /path/to/output --job-id <id> --format json
 pnpm --silent agent-jobs doctor --output-dir /path/to/output --task-spec /path/to/task.md
 pnpm --silent agent-jobs mcp
 ```
