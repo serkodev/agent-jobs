@@ -3,12 +3,17 @@ import { resolve } from 'node:path';
 
 import { defineConfig } from 'vite';
 
+import packageMetadata from './package.json' with { type: 'json' };
+
 const nodeBuiltins = new Set([
   ...builtinModules,
   ...builtinModules.map((name) => `node:${name}`),
 ]);
 
 export default defineConfig({
+  define: {
+    __AGENT_JOBS_PACKAGE_VERSION__: JSON.stringify(packageMetadata.version),
+  },
   resolve: {
     conditions: ['node'],
     mainFields: ['module', 'main'],

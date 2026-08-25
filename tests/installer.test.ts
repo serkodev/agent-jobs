@@ -97,6 +97,13 @@ describe('agent-jobs installer', () => {
       targets: ['codex', 'claude'],
       create: false,
     });
+    const manifest = JSON.parse(
+      await readFile(join(context.cwd, '.agent-jobs', 'install-manifest.json'), 'utf8'),
+    ) as { package_version: string };
+    const packageMetadata = JSON.parse(
+      await readFile(join(process.cwd(), 'package.json'), 'utf8'),
+    ) as { version: string };
+    expect(manifest.package_version).toBe(packageMetadata.version);
     const codexScript = join(
       context.cwd,
       '.agents',

@@ -41,7 +41,9 @@ import {
   routingBlock,
 } from './install-templates.js';
 
-const PACKAGE_VERSION = '0.3.0';
+declare const __AGENT_JOBS_PACKAGE_VERSION__: string;
+
+const PACKAGE_VERSION = __AGENT_JOBS_PACKAGE_VERSION__;
 const TARGETS = new Set<InstallTarget>(['all', 'codex', 'claude']);
 
 export type InstallTarget = 'all' | 'codex' | 'claude';
