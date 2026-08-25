@@ -1,4 +1,13 @@
-import { mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  realpath,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -186,6 +195,7 @@ describe('agent-jobs installer', () => {
   it('does not create a missing target before confirmation', async () => {
     const context = await fixture();
     const target = join(context.root, 'new', 'project');
+    const canonicalTarget = join(await realpath(context.root), 'new', 'project');
     const stdout = capture();
     let prompt = '';
 
@@ -204,7 +214,7 @@ describe('agent-jobs installer', () => {
       }),
     ).resolves.toBe(0);
 
-    expect(prompt).toContain(`Path:    ${target}`);
+    expect(prompt).toContain(`Path:    ${canonicalTarget}`);
     expect(prompt).toContain('Create:  yes');
     expect(stdout.read()).toContain('Cancelled');
     await expect(exists(target)).resolves.toBe(false);
@@ -227,6 +237,44 @@ describe('agent-jobs installer', () => {
 
     await expect(exists(join(target, '.codex', 'agents', 'agent_job_worker.toml'))).resolves.toBe(true);
     await expect(exists(join(target, '.claude'))).resolves.toBe(false);
+  });
+
+  it('keeps a newly created target canonical across init and uninstall', async () => {
+    const context = await fixture();
+    const canonicalParent = join(context.cwd, 'canonical-parent');
+    const linkedParent = join(context.cwd, 'linked-parent');
+    await mkdir(join(canonicalParent, 'nested'), { recursive: true });
+    await symlink(canonicalParent, linkedParent, 'dir');
+    const target = join(linkedParent, 'nested', 'project');
+    const canonicalTarget = join(await realpath(canonicalParent), 'nested', 'project');
+    const environment = {
+      cwd: context.cwd,
+      homeDir: context.home,
+      bundlePath: context.bundle,
+      stderr: capture().stream,
+      isTTY: false,
+    };
+    const initOutput = capture();
+
+    await runInstallerCommand('init', [target, '--target', 'codex', '--yes', '--json'], {
+      ...environment,
+      stdout: initOutput.stream,
+    });
+    expect(JSON.parse(initOutput.read())).toMatchObject({ path: canonicalTarget });
+
+    const uninstallOutput = capture();
+    await runInstallerCommand(
+      'uninstall',
+      [target, '--target', 'codex', '--yes', '--json'],
+      { ...environment, stdout: uninstallOutput.stream },
+    );
+    expect(JSON.parse(uninstallOutput.read())).toMatchObject({
+      path: canonicalTarget,
+      status: 'uninstalled',
+    });
+    await expect(exists(join(canonicalTarget, '.agent-jobs', 'install-manifest.json'))).resolves.toBe(
+      false,
+    );
   });
 
   it('makes doctor recognize a complete host install but not a skill alone', async () => {

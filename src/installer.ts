@@ -351,7 +351,9 @@ async function resolveRoot(
   } catch {
     throw new AgentJobsError('permission_denied', `Parent directory is not writable: ${ancestor}`);
   }
-  return { root: candidate, scope: 'project', createRoot: true };
+  const canonicalAncestor = await realpath(ancestor);
+  const canonicalCandidate = resolve(canonicalAncestor, relative(ancestor, candidate));
+  return { root: canonicalCandidate, scope: 'project', createRoot: true };
 }
 
 function installLocations(
