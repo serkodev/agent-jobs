@@ -46,10 +46,9 @@ npx agent-jobs init ./my-project --target codex
 npx agent-jobs init --global --target claude
 ```
 
-The installer shows every path it will change and asks for confirmation. Use
-`--dry-run` to preview the changes, or `--yes` in a non-interactive environment.
-Use `--force` only when you intentionally want to replace managed files that have
-been edited since installation.
+The installer shows the target path and asks for confirmation. Use `--yes` in a
+non-interactive environment. Use `--force` only when you intentionally want to
+replace managed files that have been edited since installation.
 
 Restart Codex or Claude after installation so it discovers the new skill, agents,
 and MCP configuration.

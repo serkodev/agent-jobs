@@ -323,21 +323,21 @@ describe('agent-jobs installer', () => {
     expect(completeCheck).toMatchObject({ ok: true });
   });
 
-  it('keeps dry-run side-effect free and does not require confirmation', async () => {
+  it('rejects the removed --dry-run option', async () => {
     const context = await fixture();
     const target = join(context.root, 'dry-run-project');
-    const stdout = capture();
 
-    await runInstallerCommand('init', [target, '--dry-run', '--json'], {
-      cwd: context.cwd,
-      homeDir: context.home,
-      bundlePath: context.bundle,
-      stdout: stdout.stream,
-      stderr: capture().stream,
-      isTTY: false,
-    });
+    await expect(
+      runInstallerCommand('init', [target, '--dry-run', '--json'], {
+        cwd: context.cwd,
+        homeDir: context.home,
+        bundlePath: context.bundle,
+        stdout: capture().stream,
+        stderr: capture().stream,
+        isTTY: false,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_arguments' });
 
-    expect(JSON.parse(stdout.read())).toMatchObject({ status: 'dry_run', create: true });
     await expect(exists(target)).resolves.toBe(false);
   });
 
