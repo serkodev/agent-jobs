@@ -10,7 +10,6 @@ import {
 import { spawn, type ChildProcess } from "node:child_process";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -401,7 +400,7 @@ function spawnLockProcess(
   mode: "block" | "normal" | "crash",
   blockMs: number,
 ): ChildProcess {
-  const storageUrl = pathToFileURL(join(process.cwd(), "src", "storage.ts")).href;
+  const storageUrl = new URL("../src/storage.ts", import.meta.url).href;
   const script = `
 import { withLock } from ${JSON.stringify(storageUrl)};
 const lockPath = process.env.BATCH_TEST_LOCK_PATH;

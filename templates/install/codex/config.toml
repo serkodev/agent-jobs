@@ -1,9 +1,7 @@
-[agents]
-enabled = true
-
-[mcp_servers.batch_tasks]
-command = "pnpm"
-args = ["--silent", "batch-tasks", "mcp"]
+# batch-tasks-agent:start
+{{AGENTS_SECTION}}[mcp_servers.batch_tasks]
+command = "node"
+args = [{{SCRIPT_PATH}}, "mcp"]
 required = true
 startup_timeout_sec = 30
 tool_timeout_sec = 120
@@ -17,4 +15,5 @@ approval_mode = "approve"
 approval_mode = "approve"
 
 [mcp_servers.batch_tasks.tools.submit_result]
-approval_mode = "approve"
+approval_mode = "approve"{{PROJECT_ENV_SECTION}}
+# batch-tasks-agent:end

@@ -80,9 +80,17 @@ describe('batch_tasks MCP surface', () => {
   });
 
   it('performs a real stdio handshake without polluting protocol stdout', async () => {
+    const mcpModule = new URL('../src/mcp-server.ts', import.meta.url).href;
+    const mcpScript = `import { runMcpServer } from ${JSON.stringify(mcpModule)}; await runMcpServer();`;
     const transport = new StdioClientTransport({
-      command: process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm',
-      args: ['--silent', 'batch-tasks', 'mcp'],
+      command: process.execPath,
+      args: [
+        '--import',
+        'tsx',
+        '--input-type=module',
+        '--eval',
+        mcpScript,
+      ],
       cwd: process.cwd(),
       stderr: 'pipe',
     });

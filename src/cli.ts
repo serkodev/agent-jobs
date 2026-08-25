@@ -1,16 +1,20 @@
 import { writeSync } from 'node:fs';
 import { parseArgs } from 'node:util';
-import { pathToFileURL } from 'node:url';
 
-import { BatchTasksError } from './errors.js';
-import { runMcpServer } from './mcp-server.js';
 import {
   BatchRuntime,
+  BatchTasksError,
   type CollectFormat,
   type OnError,
   type PrepareOptions,
-} from './state.js';
-import { stringifyStrictJson } from './storage.js';
+  runMcpServer,
+  stringifyStrictJson,
+} from '@batch-tasks/runtime';
+
+import {
+  runInstallerCommand,
+  type InstallerEnvironment,
+} from './installer.js';
 
 const COLLECT_FORMATS: ReadonlySet<CollectFormat> = new Set([
   'none',
@@ -36,6 +40,7 @@ export interface CliDependencies {
   runMcp?: () => unknown | Promise<unknown>;
   stdout?: Writable;
   stderr?: Writable;
+  installer?: Omit<InstallerEnvironment, 'stdout' | 'stderr'>;
 }
 
 export interface ProcessCliDependencies extends CliDependencies {
@@ -51,6 +56,8 @@ interface InvocationArguments {
 const HELP = `Usage: batch-tasks <command> [options]
 
 Commands:
+  init      Initialize batch-tasks in the current or specified directory
+  uninstall Remove files managed by a previous batch-tasks initialization
   prepare   Validate all input rows and prepare a batch
   next      Issue opaque worker assignments
   status    Inspect batch progress
@@ -289,6 +296,13 @@ export async function runCli(
       await (dependencies.runMcp ?? runMcpServer)();
       return 0;
     }
+    if (command === 'init' || command === 'uninstall') {
+      return await runInstallerCommand(command, argv.slice(1), {
+        ...dependencies.installer,
+        stdout,
+        stderr,
+      });
+    }
 
     const runtime =
       dependencies.runtime ??
@@ -381,10 +395,3 @@ function writeSignalSafe(stream: Writable, value: string): void {
 }
 
 export const main = runProcessCli;
-
-const invokedPath = process.argv[1];
-if (invokedPath && import.meta.url === pathToFileURL(invokedPath).href) {
-  void runProcessCli().then((exitCode) => {
-    process.exitCode = exitCode;
-  });
-}

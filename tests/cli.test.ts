@@ -2,9 +2,9 @@ import { EventEmitter } from 'node:events';
 
 import { describe, expect, it, vi } from 'vitest';
 
+import { BatchTasksError, type BatchRuntime } from '@batch-tasks/runtime';
+
 import { runCli, runProcessCli } from '../src/cli.js';
-import { BatchTasksError } from '../src/errors.js';
-import type { BatchRuntime } from '../src/state.js';
 
 function captureStream(): {
   stream: Pick<NodeJS.WritableStream, 'write'>;

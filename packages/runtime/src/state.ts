@@ -52,7 +52,6 @@ const COLLECT_FORMATS = new Set<CollectFormat>([
   "jsonl",
   "csv",
 ]);
-const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 export type PathInput = string | URL;
 export type CollectFormat = "none" | "json" | "jsonl" | "csv";
@@ -71,6 +70,7 @@ type JsonSchema = Record<string, unknown>;
 
 export interface BatchRuntimeOptions {
   registryDir?: PathInput;
+  projectRoot?: PathInput;
 }
 
 export interface PrepareOptions {
@@ -180,8 +180,17 @@ export interface QueueCounts extends JsonObject {
  */
 export class BatchRuntime {
   public readonly registryDir: string;
+  public readonly projectRoot: string;
 
   public constructor(options: BatchRuntimeOptions | PathInput = {}) {
+    const structured =
+      typeof options === "string" || options instanceof URL ? {} : options;
+    this.projectRoot = absolutePath(
+      structured.projectRoot ??
+        process.env.BATCH_TASKS_PROJECT_DIR ??
+        process.env.CLAUDE_PROJECT_DIR ??
+        process.cwd(),
+    );
     const explicit =
       typeof options === "string" || options instanceof URL
         ? options
@@ -189,7 +198,7 @@ export class BatchRuntime {
     const configured =
       explicit ??
       process.env.BATCH_TASKS_REGISTRY_DIR ??
-      join(PROJECT_ROOT, ".batch-tasks-agent", "handles");
+      join(this.projectRoot, ".batch-tasks-agent", "handles");
     this.registryDir = absolutePath(configured);
   }
 
@@ -718,24 +727,162 @@ export class BatchRuntime {
       detail: { version: nodeVersion, required: ">=20.6" },
     });
 
-    const projectFiles = [
-      join(PROJECT_ROOT, "AGENTS.md"),
-      join(PROJECT_ROOT, ".codex", "config.toml"),
-      join(PROJECT_ROOT, ".codex", "agents", "batch_worker.toml"),
-      join(PROJECT_ROOT, ".agents", "skills", "batch-tasks", "SKILL.md"),
-    ];
-    const missing: string[] = [];
-    for (const path of projectFiles) {
-      try {
-        await ensureRealFile(path);
-      } catch {
-        missing.push(path);
+    const userHome = homedir();
+    const hostFiles = {
+      codex: [
+        {
+          scope: "project",
+          paths: [
+            join(this.projectRoot, "AGENTS.md"),
+            join(this.projectRoot, ".codex", "config.toml"),
+            join(this.projectRoot, ".codex", "agents", "batch_worker.toml"),
+            join(
+              this.projectRoot,
+              ".codex",
+              "agents",
+              "batch_postprocessor.toml",
+            ),
+            join(
+              this.projectRoot,
+              ".agents",
+              "skills",
+              "batch-tasks",
+              "SKILL.md",
+            ),
+            join(
+              this.projectRoot,
+              ".agents",
+              "skills",
+              "batch-tasks",
+              "scripts",
+              "batch-tasks.mjs",
+            ),
+          ],
+        },
+        {
+          scope: "global",
+          paths: [
+            join(userHome, ".codex", "AGENTS.md"),
+            join(userHome, ".codex", "config.toml"),
+            join(userHome, ".codex", "agents", "batch_worker.toml"),
+            join(userHome, ".codex", "agents", "batch_postprocessor.toml"),
+            join(userHome, ".agents", "skills", "batch-tasks", "SKILL.md"),
+            join(
+              userHome,
+              ".agents",
+              "skills",
+              "batch-tasks",
+              "scripts",
+              "batch-tasks.mjs",
+            ),
+          ],
+        },
+        {
+          scope: "development",
+          paths: [
+            join(this.projectRoot, "AGENTS.md"),
+            join(this.projectRoot, ".codex", "config.toml"),
+            join(this.projectRoot, ".codex", "agents", "batch_worker.toml"),
+            join(
+              this.projectRoot,
+              ".codex",
+              "agents",
+              "batch_postprocessor.toml",
+            ),
+            join(
+              this.projectRoot,
+              ".agents",
+              "skills",
+              "batch-tasks",
+              "SKILL.md",
+            ),
+            join(this.projectRoot, "dist", "batch-tasks.mjs"),
+          ],
+        },
+      ],
+      claude: [
+        {
+          scope: "project",
+          paths: [
+            join(this.projectRoot, "CLAUDE.md"),
+            join(this.projectRoot, ".mcp.json"),
+            join(this.projectRoot, ".claude", "settings.local.json"),
+            join(this.projectRoot, ".claude", "agents", "batch_worker.md"),
+            join(
+              this.projectRoot,
+              ".claude",
+              "agents",
+              "batch_postprocessor.md",
+            ),
+            join(
+              this.projectRoot,
+              ".claude",
+              "skills",
+              "batch-tasks",
+              "SKILL.md",
+            ),
+            join(
+              this.projectRoot,
+              ".claude",
+              "skills",
+              "batch-tasks",
+              "scripts",
+              "batch-tasks.mjs",
+            ),
+          ],
+        },
+        {
+          scope: "global",
+          paths: [
+            join(userHome, ".claude", "CLAUDE.md"),
+            join(userHome, ".claude.json"),
+            join(userHome, ".claude", "settings.json"),
+            join(userHome, ".claude", "agents", "batch_worker.md"),
+            join(userHome, ".claude", "agents", "batch_postprocessor.md"),
+            join(userHome, ".claude", "skills", "batch-tasks", "SKILL.md"),
+            join(
+              userHome,
+              ".claude",
+              "skills",
+              "batch-tasks",
+              "scripts",
+              "batch-tasks.mjs",
+            ),
+          ],
+        },
+      ],
+    };
+    const installation: Record<string, unknown> = {};
+    let installed = false;
+    for (const [host, candidates] of Object.entries(hostFiles)) {
+      const details: JsonObject[] = [];
+      let hostInstalled = false;
+      for (const candidate of candidates) {
+        const missing: string[] = [];
+        for (const path of candidate.paths) {
+          try {
+            await ensureRealFile(path);
+          } catch {
+            missing.push(path);
+          }
+        }
+        const ok = missing.length === 0;
+        hostInstalled ||= ok;
+        details.push({ scope: candidate.scope, ok, missing });
       }
+      installed ||= hostInstalled;
+      installation[host] = { ok: hostInstalled, candidates: details };
     }
     checks.push({
-      name: "project_files",
-      ok: missing.length === 0,
-      detail: { missing },
+      name: "installation",
+      ok: installed,
+      detail: {
+        code: installed ? "installed" : "init_required",
+        hosts: installation,
+        hint: installed
+          ? null
+          : "Run batch-tasks init --yes (or use the published/local npx package).",
+      },
     });
 
     try {
@@ -794,7 +941,7 @@ export class BatchRuntime {
       ok: checks.every((check) => check.ok === true),
       node: nodeVersion,
       node_executable: process.execPath,
-      project_root: PROJECT_ROOT,
+      project_root: this.projectRoot,
       registry_dir: this.registryDir,
       checks,
     };
