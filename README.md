@@ -28,6 +28,10 @@ prompt 額外要求或預先手動執行它；batch skill 會安排 worker 呼�
 無法啟動，`required = true` 會令流程明確失敗，不會退回直接寫入 result 檔案。
 這三個 project-local tools 設為 `auto` approval，正常 batch 不會逐筆要求你確認。
 
+三份 MCP 設定刻意省略 `cwd`；目前 Codex 實測會以各 task 的 repository root 啟動 server，
+因此 clone 到任何路徑都能運作。請勿加入 `cwd = "."`：Codex Desktop 可能相對於
+host app-server 的工作目錄解析它，而不是相對於目前 repository。
+
 ## Quick start
 
 `spec/.example.md` 是不會被 glob 自動發現的模板；repo 另附可直接執行的

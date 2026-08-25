@@ -12,3 +12,9 @@ default_tools_approval_mode = "auto"
 
 [mcp_servers.batch_tasks.tools.report_failure]
 approval_mode = "approve"
+
+[mcp_servers.batch_tasks.tools.get_assignment]
+approval_mode = "approve"
+
+[mcp_servers.batch_tasks.tools.submit_result]
+approval_mode = "approve"
