@@ -1,7 +1,7 @@
-# Batch Tasks Agent
+# Agent Jobs
 
-一個可重用、可續跑、以 JSON Schema 驗證的 TypeScript batch framework，支援 Codex
-及 Claude。每筆 input 都由全新的 native subagent context 處理；parent 只取得
+一個可安裝、可重用、可續跑、以 JSON Schema 驗證的 TypeScript agent-job framework，
+支援 Codex 及 Claude。每筆 input 都由全新的 native subagent context 處理；parent 只取得
 canonical ID 與 opaque assignment handle，worker 再透過本地 stdio MCP 取得唯一一筆
 資料並 atomic commit 結果。
 
@@ -10,18 +10,18 @@ canonical ID 與 opaque assignment handle，worker 再透過本地 stdio MCP 取
 使用者只需要 Node.js 20.6+。本階段先用本機 tarball 驗證，不 publish 到 npm：
 
 ```bash
-# 在本 repository 產生 batch-tasks-agent-0.3.0.tgz
+# 在本 repository 產生 agent-jobs-0.3.0.tgz
 pnpm install --frozen-lockfile
 pnpm pack
 
 # 在任意目錄初始化目前專案
-npm exec --yes --package=file:/absolute/path/batch-tasks-agent-0.3.0.tgz -- batch-tasks init
+npm exec --yes --package=file:/absolute/path/agent-jobs-0.3.0.tgz -- agent-jobs init
 
 # 指定新路徑；目錄不存在時會在確認後建立
-npm exec --yes --package=file:/absolute/path/batch-tasks-agent-0.3.0.tgz -- batch-tasks init ./my-project
+npm exec --yes --package=file:/absolute/path/agent-jobs-0.3.0.tgz -- agent-jobs init ./my-project
 
 # CI／非互動環境
-npm exec --yes --package=file:/absolute/path/batch-tasks-agent-0.3.0.tgz -- batch-tasks init ./my-project --yes
+npm exec --yes --package=file:/absolute/path/agent-jobs-0.3.0.tgz -- agent-jobs init ./my-project --yes
 ```
 
 `init` 預設安裝 Codex 與 Claude 所需的 skill、兩個 custom agents 及 MCP 設定。
@@ -32,12 +32,12 @@ npm exec --yes --package=file:/absolute/path/batch-tasks-agent-0.3.0.tgz -- batc
 完成後重新啟動 Codex／Claude，再執行：
 
 ```bash
-node .agents/skills/batch-tasks/scripts/batch-tasks.mjs doctor  # Codex project install
-node .claude/skills/batch-tasks/scripts/batch-tasks.mjs doctor # Claude project install
+node .agents/skills/agent-jobs/scripts/agent-jobs.mjs doctor  # Codex project install
+node .claude/skills/agent-jobs/scripts/agent-jobs.mjs doctor # Claude project install
 ```
 
 MCP 是由宿主自動啟動的本地 stdio process。你不需要在 prompt 額外要求或預先手動
-執行；batch skill 會安排 worker 呼叫 MCP。若 server 無法啟動，流程會明確失敗，
+執行；Agent Jobs skill 會安排 worker 呼叫 MCP。若 server 無法啟動，流程會明確失敗，
 不會退回直接寫入 result 檔案。
 
 開發與建置需要 Node.js 20.19+ 或 22.12+（Vite 8 的 build-time 要求）及 pnpm。
@@ -46,7 +46,7 @@ Node.js 20.6+，不需要安裝 pnpm、tsx 或 runtime dependencies。
 
 ## Quick start
 
-先在已執行 `batch-tasks init` 的目標專案準備 input data 與 task spec。例如
+先在已執行 `agent-jobs init` 的目標專案準備 input data 與 task spec。例如
 `batch-input.json`：
 
 ```json
@@ -99,7 +99,7 @@ MAX_CONCURRENCY: 4
 COLLECT_FORMAT: json
 ```
 
-`AGENTS.md` 會把含四個 required markers 的 prompt 路由到 batch skill。markers 以外
+`AGENTS.md` 會把含四個 required markers 的 prompt 路由到 Agent Jobs skill。markers 以外
 的 prose 只供 parent 及可選的 postprocessor 使用，不會傳給 row worker。
 
 ## Prompt markers
@@ -168,32 +168,32 @@ lock，owner crash 時可回收。若無法在 30 秒內取得，會回報含 ow
 recovery claim 也不會被其他 waiter 強行偷走；重新送出原 prompt 執行 `prepare`
 會產生新 invocation，並依既有 `runs/` 繼續，不需要破壞性地刪除 lock。
 
-Handle registry 預設位於目標專案 root 的 `.batch-tasks-agent/handles/`；
-可在啟動 Codex 前用 `BATCH_TASKS_REGISTRY_DIR` override，確保 parent CLI 與 MCP process
+Handle registry 預設位於目標專案 root 的 `.agent-jobs/handles/`；
+可在啟動 Codex 前用 `AGENT_JOBS_REGISTRY_DIR` override，確保 parent CLI 與 MCP process
 繼承同一個值。registry 是本機 ephemeral capability index，不是可攜式 cache。
 
 ## CLI
 
 通常由 skill 自動使用；以下 commands 可供診斷或整合測試：
-Repository 內修改 source 或 templates 後先執行 `pnpm build`；`pnpm batch-tasks`
-會直接執行最新的 `dist/batch-tasks.mjs`，避免 build log 污染 JSON 或 MCP stdio。
+Repository 內修改 source 或 templates 後先執行 `pnpm build`；`pnpm agent-jobs`
+會直接執行最新的 `dist/agent-jobs.mjs`，避免 build log 污染 JSON 或 MCP stdio。
 
 ```bash
-batch-tasks init [path] [--target all|codex|claude] [--global] [--yes] [--dry-run] [--force] [--json]
-batch-tasks uninstall [path] [--target all|codex|claude] [--global] [--yes] [--dry-run] [--json]
+agent-jobs init [path] [--target all|codex|claude] [--global] [--yes] [--dry-run] [--force] [--json]
+agent-jobs uninstall [path] [--target all|codex|claude] [--global] [--yes] [--dry-run] [--json]
 
-pnpm --silent batch-tasks prepare \
+pnpm --silent agent-jobs prepare \
   --input-data /path/to/input.json \
   --task-spec /path/to/task.md \
   --id-column-key id \
   --output-dir /path/to/output
 
-pnpm --silent batch-tasks next --output-dir /path/to/output --invocation-id <id> --count 4
-pnpm --silent batch-tasks status --output-dir /path/to/output --invocation-id <id>
-pnpm --silent batch-tasks validate --output-dir /path/to/output --invocation-id <id>
-pnpm --silent batch-tasks collect --output-dir /path/to/output --invocation-id <id> --format json
-pnpm --silent batch-tasks doctor --output-dir /path/to/output --task-spec /path/to/task.md
-pnpm --silent batch-tasks mcp
+pnpm --silent agent-jobs next --output-dir /path/to/output --invocation-id <id> --count 4
+pnpm --silent agent-jobs status --output-dir /path/to/output --invocation-id <id>
+pnpm --silent agent-jobs validate --output-dir /path/to/output --invocation-id <id>
+pnpm --silent agent-jobs collect --output-dir /path/to/output --invocation-id <id> --format json
+pnpm --silent agent-jobs doctor --output-dir /path/to/output --task-spec /path/to/task.md
+pnpm --silent agent-jobs mcp
 ```
 
 除 `mcp` 的 JSON-RPC stdio protocol 外，每個 command 都只輸出一個 JSON object。
@@ -202,7 +202,7 @@ pnpm --silent batch-tasks mcp
 
 ## 開發與驗證
 
-這是兩個 package 的 pnpm workspace：root `batch-tasks-agent` 負責 installer、host
+這是兩個 package 的 pnpm workspace：root `agent-jobs` 負責 installer、host
 templates 與公開 CLI，`packages/runtime` 負責 batch state machine、資料驗證及 MCP。
 依賴只允許 installer 指向 runtime；runtime 不知道 Codex、Claude 或安裝路徑。
 
@@ -217,7 +217,7 @@ pnpm test
 pnpm build
 
 # 本機模擬使用者專案；playground/ 不會納入版本控制
-pnpm batch-tasks init playground
+pnpm agent-jobs init playground
 ```
 
 主要 CLI commands 是 `prepare`、`next`、`status`、`validate`、`collect`、`doctor`、
@@ -234,7 +234,7 @@ pnpm batch-tasks init playground
 
 Row worker 使用 fresh context 與 read-only sandbox；project role 也停用 shell、web、apps、
 memory、multi-agent、remote-plugin discovery、skill dependency installation與 image reading，
-並在 instruction 層只允許 `batch_tasks` MCP。這可避免 workers 共用 conversation 或 results。
+並在 instruction 層只允許 `agent_jobs` MCP。這可避免 workers 共用 conversation 或 results。
 
 這仍是 best-effort application boundary，不是 OS security boundary：native subagents 共用
 Codex host 與底層 filesystem，project/custom-agent config 也無法以全域 deny 移除所有使用者

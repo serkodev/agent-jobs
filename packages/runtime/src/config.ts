@@ -1,4 +1,4 @@
-import { BatchTasksError } from "./errors.js";
+import { AgentJobsError } from "./errors.js";
 
 export const MARKER_NAMES = new Set([
   "INPUT_DATA",
@@ -35,7 +35,7 @@ export function parsePromptMarkers(prompt: string): PromptMarkers {
     const name = match[1] as MarkerName;
     const raw = match[2] ?? "";
     if (Object.prototype.hasOwnProperty.call(values, name)) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "duplicate_marker",
         `Marker ${name} appears more than once`,
         { marker: name, line: index + 1 },
@@ -60,7 +60,7 @@ export function stripPromptMarkers(prompt: string): string {
 
 function coerceMarker(name: MarkerName, raw: string): MarkerValue {
   if (raw.length === 0 && name !== "RECORDS_PATH") {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "empty_marker",
       `Marker ${name} must have a value`,
       { marker: name },
@@ -69,21 +69,21 @@ function coerceMarker(name: MarkerName, raw: string): MarkerValue {
 
   if (name === "MAX_CONCURRENCY" || name === "MAX_RETRIES") {
     if (!/^[+-]?\d+$/.test(raw)) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "invalid_marker",
         `Marker ${name} must be an integer`,
       );
     }
     const parsed = Number(raw);
     if (!Number.isSafeInteger(parsed)) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "invalid_marker",
         `Marker ${name} must be a safe integer`,
       );
     }
     const minimum = name === "MAX_CONCURRENCY" ? 1 : 0;
     if (parsed < minimum) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "invalid_marker",
         `Marker ${name} must be at least ${minimum}`,
       );
@@ -99,14 +99,14 @@ function coerceMarker(name: MarkerName, raw: string): MarkerValue {
     if (["false", "no", "0", "off"].includes(normalized)) {
       return false;
     }
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "invalid_marker",
       "Marker RETRY_INVALID must be true or false",
     );
   }
 
   if (name === "ON_ERROR" && !["stop", "continue_successes"].includes(raw)) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "invalid_marker",
       "Marker ON_ERROR must be stop or continue_successes",
     );
@@ -115,7 +115,7 @@ function coerceMarker(name: MarkerName, raw: string): MarkerValue {
     name === "COLLECT_FORMAT" &&
     !["none", "json", "jsonl", "csv"].includes(raw)
   ) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "invalid_marker",
       "Marker COLLECT_FORMAT must be none, json, jsonl, or csv",
     );

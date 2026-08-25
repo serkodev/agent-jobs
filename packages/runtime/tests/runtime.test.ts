@@ -15,9 +15,9 @@ import { join } from "node:path";
 import { stringify as stringifyYaml } from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { BatchTasksError } from "../src/errors.js";
+import { AgentJobsError } from "../src/errors.js";
 import { safeIdFilename } from "../src/input.js";
-import { BatchRuntime, type PrepareOptions } from "../src/state.js";
+import { AgentJobsRuntime, type PrepareOptions } from "../src/state.js";
 import {
   atomicWriteJson,
   parseStrictJson,
@@ -54,7 +54,7 @@ async function fixture(options: {
   inputPath: string;
   specPath: string;
   outputDir: string;
-  runtime: BatchRuntime;
+  runtime: AgentJobsRuntime;
 }> {
   const root = await mkdtemp(join(tmpdir(), "batch-runtime-test-"));
   temporaryRoots.push(root);
@@ -110,7 +110,7 @@ async function fixture(options: {
     inputPath,
     specPath,
     outputDir,
-    runtime: new BatchRuntime({ registryDir: join(root, "registry") }),
+    runtime: new AgentJobsRuntime({ registryDir: join(root, "registry") }),
   };
 }
 
@@ -159,7 +159,7 @@ async function readStrict(path: string): Promise<unknown> {
   return parseStrictJson(await readFile(path, "utf8"));
 }
 
-describe("BatchRuntime", () => {
+describe("AgentJobsRuntime", () => {
   it("preflights every row before creating state or leasing a worker", async () => {
     const context = await fixture({
       rows: [
@@ -198,9 +198,9 @@ describe("BatchRuntime", () => {
       ],
     });
     const error = await prepare(collision).catch((caught: unknown) => caught);
-    expect(error).toBeInstanceOf(BatchTasksError);
+    expect(error).toBeInstanceOf(AgentJobsError);
     expect(error).toMatchObject({ code: "input_validation_failed" });
-    expect(stringifyStrictJson((error as BatchTasksError).details)).toContain(
+    expect(stringifyStrictJson((error as AgentJobsError).details)).toContain(
       "id_filename_collision",
     );
   });
@@ -212,9 +212,9 @@ describe("BatchRuntime", () => {
     });
 
     const error = await prepare(context).catch((caught: unknown) => caught);
-    expect(error).toBeInstanceOf(BatchTasksError);
+    expect(error).toBeInstanceOf(AgentJobsError);
     expect(error).toMatchObject({ code: "input_validation_failed" });
-    const diagnostics = (error as BatchTasksError).details as Array<{
+    const diagnostics = (error as AgentJobsError).details as Array<{
       code: string;
       row?: number;
       rows?: number[];

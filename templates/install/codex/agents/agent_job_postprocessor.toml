@@ -1,5 +1,5 @@
-# Managed by batch-tasks-agent. Re-run `batch-tasks init` to update.
-name = "batch_postprocessor"
+# Managed by agent-jobs. Re-run `agent-jobs init` to update.
+name = "agent_job_postprocessor"
 description = "Read-only synthesizer for validated, collected batch results."
 sandbox_mode = "read-only"
 web_search = "disabled"

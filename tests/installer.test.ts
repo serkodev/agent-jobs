@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import YAML from 'yaml';
 
-import { BatchRuntime } from '@batch-tasks/runtime';
+import { AgentJobsRuntime } from '@agent-jobs/runtime';
 
 import { runInstallerCommand } from '../src/installer.js';
 
@@ -41,7 +41,7 @@ async function fixture(): Promise<{
   roots.push(root);
   const cwd = join(root, 'cwd');
   const home = join(root, 'home');
-  const bundle = join(root, 'batch-tasks.mjs');
+  const bundle = join(root, 'agent-jobs.mjs');
   await mkdir(cwd);
   await mkdir(home);
   await writeFile(bundle, '#!/usr/bin/env node\nconsole.log("bundle");\n', 'utf8');
@@ -62,7 +62,7 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-describe('batch-tasks installer', () => {
+describe('agent-jobs installer', () => {
   it('uses cwd by default and installs both hosts with absolute script paths', async () => {
     const context = await fixture();
     const stdout = capture();
@@ -92,31 +92,31 @@ describe('batch-tasks installer', () => {
       context.cwd,
       '.agents',
       'skills',
-      'batch-tasks',
+      'agent-jobs',
       'scripts',
-      'batch-tasks.mjs',
+      'agent-jobs.mjs',
     );
     const claudeScript = join(
       context.cwd,
       '.claude',
       'skills',
-      'batch-tasks',
+      'agent-jobs',
       'scripts',
-      'batch-tasks.mjs',
+      'agent-jobs.mjs',
     );
     await expect(readFile(codexScript, 'utf8')).resolves.toContain('#!/usr/bin/env node');
     await expect(readFile(claudeScript, 'utf8')).resolves.toContain('#!/usr/bin/env node');
 
     const agents = await readFile(join(context.cwd, 'AGENTS.md'), 'utf8');
     const codexSkill = await readFile(
-      join(context.cwd, '.agents', 'skills', 'batch-tasks', 'SKILL.md'),
+      join(context.cwd, '.agents', 'skills', 'agent-jobs', 'SKILL.md'),
       'utf8',
     );
     for (const marker of ['INPUT_DATA', 'TASK_SPEC', 'ID_COLUMN_KEY', 'OUTPUT_DIR']) {
       expect(agents).toContain(`${marker}:`);
       expect(codexSkill).toContain(`\`${marker}\``);
     }
-    expect(agents).toContain('.agents/skills/batch-tasks/SKILL.md');
+    expect(agents).toContain('.agents/skills/agent-jobs/SKILL.md');
     expect(codexSkill).toContain(`${JSON.stringify(codexScript)} prepare`);
     expect(codexSkill).toContain('init_required');
     expect(codexSkill).toContain('fork_turns: "none"');
@@ -131,7 +131,7 @@ describe('batch-tasks installer', () => {
     );
 
     const codexWorker = await readFile(
-      join(context.cwd, '.codex', 'agents', 'batch_worker.toml'),
+      join(context.cwd, '.codex', 'agents', 'agent_job_worker.toml'),
       'utf8',
     );
     for (const restriction of [
@@ -151,34 +151,34 @@ describe('batch-tasks installer', () => {
 
     const metadata = YAML.parse(
       await readFile(
-        join(context.cwd, '.agents', 'skills', 'batch-tasks', 'agents', 'openai.yaml'),
+        join(context.cwd, '.agents', 'skills', 'agent-jobs', 'agents', 'openai.yaml'),
         'utf8',
       ),
     ) as Record<string, unknown>;
     expect(metadata).toMatchObject({
-      interface: { display_name: 'Batch Tasks' },
+      interface: { display_name: 'Agent Jobs' },
       policy: { allow_implicit_invocation: true },
     });
 
     const claudeMcp = JSON.parse(await readFile(join(context.cwd, '.mcp.json'), 'utf8')) as {
-      mcpServers: { batch_tasks: { args: string[] } };
+      mcpServers: { agent_jobs: { args: string[] } };
     };
-    expect(claudeMcp.mcpServers.batch_tasks.args).toEqual([claudeScript, 'mcp']);
+    expect(claudeMcp.mcpServers.agent_jobs.args).toEqual([claudeScript, 'mcp']);
     const claudeWorker = await readFile(
-      join(context.cwd, '.claude', 'agents', 'batch_worker.md'),
+      join(context.cwd, '.claude', 'agents', 'agent_job_worker.md'),
       'utf8',
     );
     const frontmatter = claudeWorker.match(/^---\n([\s\S]*?)\n---/)?.[1];
     expect(YAML.parse(frontmatter ?? '')).toMatchObject({
-      name: 'batch_worker',
-      mcpServers: ['batch_tasks'],
+      name: 'agent_job_worker',
+      mcpServers: ['agent_jobs'],
       permissionMode: 'dontAsk',
     });
     const claudeSkill = await readFile(
-      join(context.cwd, '.claude', 'skills', 'batch-tasks', 'SKILL.md'),
+      join(context.cwd, '.claude', 'skills', 'agent-jobs', 'SKILL.md'),
       'utf8',
     );
-    expect(claudeSkill).toContain('subagent_type: batch_worker');
+    expect(claudeSkill).toContain('subagent_type: agent_job_worker');
     expect(claudeSkill).not.toContain('fork_turns');
     expect(stderr.read()).toContain('Restart Codex and/or Claude');
   });
@@ -225,20 +225,20 @@ describe('batch-tasks installer', () => {
       }),
     ).resolves.toBe(0);
 
-    await expect(exists(join(target, '.codex', 'agents', 'batch_worker.toml'))).resolves.toBe(true);
+    await expect(exists(join(target, '.codex', 'agents', 'agent_job_worker.toml'))).resolves.toBe(true);
     await expect(exists(join(target, '.claude'))).resolves.toBe(false);
   });
 
   it('makes doctor recognize a complete host install but not a skill alone', async () => {
     const context = await fixture();
     const skillOnly = join(context.root, 'skill-only');
-    await mkdir(join(skillOnly, '.agents', 'skills', 'batch-tasks'), { recursive: true });
+    await mkdir(join(skillOnly, '.agents', 'skills', 'agent-jobs'), { recursive: true });
     await writeFile(
-      join(skillOnly, '.agents', 'skills', 'batch-tasks', 'SKILL.md'),
-      '---\nname: batch-tasks\ndescription: test\n---\n',
+      join(skillOnly, '.agents', 'skills', 'agent-jobs', 'SKILL.md'),
+      '---\nname: agent-jobs\ndescription: test\n---\n',
       'utf8',
     );
-    const incomplete = await new BatchRuntime({
+    const incomplete = await new AgentJobsRuntime({
       projectRoot: skillOnly,
       registryDir: join(context.root, 'registry-incomplete'),
     }).doctor();
@@ -258,7 +258,7 @@ describe('batch-tasks installer', () => {
       stderr: capture().stream,
       isTTY: false,
     });
-    const complete = await new BatchRuntime({
+    const complete = await new AgentJobsRuntime({
       projectRoot: context.cwd,
       registryDir: join(context.root, 'registry-complete'),
     }).doctor();
@@ -334,7 +334,7 @@ describe('batch-tasks installer', () => {
       targets: ['claude'],
     });
     await expect(
-      exists(join(context.home, '.claude', 'skills', 'batch-tasks', 'SKILL.md')),
+      exists(join(context.home, '.claude', 'skills', 'agent-jobs', 'SKILL.md')),
     ).resolves.toBe(true);
     await expect(exists(join(context.home, '.claude.json'))).resolves.toBe(true);
     await expect(exists(join(context.cwd, '.claude'))).resolves.toBe(false);
@@ -369,7 +369,7 @@ describe('batch-tasks installer', () => {
     expect(JSON.parse(stdout.read())).toMatchObject({ changed_files: [] });
     const agents = await readFile(join(context.cwd, 'AGENTS.md'), 'utf8');
     expect(agents).toContain('# Existing instructions');
-    expect(agents.match(/batch-tasks-agent:start/g)).toHaveLength(1);
+    expect(agents.match(/agent-jobs:start/g)).toHaveLength(1);
     const settings = JSON.parse(
       await readFile(join(context.cwd, '.claude', 'settings.local.json'), 'utf8'),
     ) as Record<string, unknown>;
@@ -398,7 +398,7 @@ describe('batch-tasks installer', () => {
     const config = await readFile(join(context.cwd, '.codex', 'config.toml'), 'utf8');
     expect(config.match(/^\[agents\]$/gm)).toHaveLength(1);
     expect(config).toContain('[features]\napps = true');
-    expect(config).toContain('[mcp_servers.batch_tasks]');
+    expect(config).toContain('[mcp_servers.agent_jobs]');
   });
 
   it('backs up forced managed changes and restores them during uninstall', async () => {
@@ -412,8 +412,8 @@ describe('batch-tasks installer', () => {
       isTTY: false,
     };
     await runInstallerCommand('init', ['--target', 'codex', '--yes'], environment);
-    const worker = join(context.cwd, '.codex', 'agents', 'batch_worker.toml');
-    const modified = '# Managed by batch-tasks-agent\nlocal change\n';
+    const worker = join(context.cwd, '.codex', 'agents', 'agent_job_worker.toml');
+    const modified = '# Managed by agent-jobs\nlocal change\n';
     await writeFile(worker, modified, 'utf8');
 
     await expect(
@@ -424,7 +424,7 @@ describe('batch-tasks installer', () => {
       ['--target', 'codex', '--yes', '--force'],
       environment,
     );
-    await expect(readFile(worker, 'utf8')).resolves.toContain('name = "batch_worker"');
+    await expect(readFile(worker, 'utf8')).resolves.toContain('name = "agent_job_worker"');
 
     await runInstallerCommand('uninstall', ['--target', 'codex', '--yes'], environment);
     await expect(readFile(worker, 'utf8')).resolves.toBe(modified);
@@ -446,7 +446,7 @@ describe('batch-tasks installer', () => {
     await runInstallerCommand('uninstall', ['--target', 'codex', '--yes'], environment);
 
     await expect(readFile(join(context.cwd, 'AGENTS.md'), 'utf8')).resolves.toBe(original);
-    await expect(exists(join(context.cwd, '.agents', 'skills', 'batch-tasks', 'SKILL.md'))).resolves.toBe(false);
+    await expect(exists(join(context.cwd, '.agents', 'skills', 'agent-jobs', 'SKILL.md'))).resolves.toBe(false);
 
     const stdout = capture();
     await runInstallerCommand('uninstall', ['--target', 'codex', '--yes', '--json'], {

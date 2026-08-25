@@ -1,5 +1,5 @@
-# batch-tasks-agent:start
-{{AGENTS_SECTION}}[mcp_servers.batch_tasks]
+# agent-jobs:start
+{{AGENTS_SECTION}}[mcp_servers.agent_jobs]
 command = "node"
 args = [{{SCRIPT_PATH}}, "mcp"]
 required = true
@@ -8,12 +8,12 @@ tool_timeout_sec = 120
 enabled_tools = ["get_assignment", "submit_result", "report_failure"]
 default_tools_approval_mode = "auto"
 
-[mcp_servers.batch_tasks.tools.report_failure]
+[mcp_servers.agent_jobs.tools.report_failure]
 approval_mode = "approve"
 
-[mcp_servers.batch_tasks.tools.get_assignment]
+[mcp_servers.agent_jobs.tools.get_assignment]
 approval_mode = "approve"
 
-[mcp_servers.batch_tasks.tools.submit_result]
+[mcp_servers.agent_jobs.tools.submit_result]
 approval_mode = "approve"{{PROJECT_ENV_SECTION}}
-# batch-tasks-agent:end
+# agent-jobs:end

@@ -18,9 +18,9 @@ import { parseArgs } from 'node:util';
 
 import {
   atomicWriteText,
-  BatchTasksError,
+  AgentJobsError,
   stringifyStrictJson,
-} from '@batch-tasks/runtime';
+} from '@agent-jobs/runtime';
 
 import {
   AGENTS_BLOCK_END,
@@ -36,7 +36,7 @@ import {
   codexPostprocessor,
   codexSkill,
   codexWorker,
-  isBatchTasksManaged,
+  isAgentJobsManaged,
   openAiMetadata,
   routingBlock,
 } from './install-templates.js';
@@ -123,7 +123,7 @@ export interface InstallerCommandResult extends Record<string, unknown> {
 }
 
 function invalidArguments(message: string): never {
-  throw new BatchTasksError('invalid_arguments', message);
+  throw new AgentJobsError('invalid_arguments', message);
 }
 
 function parseInstallArguments(args: readonly string[]): InstallArguments {
@@ -203,9 +203,9 @@ function replaceManagedBlock(
   const startIndex = current.indexOf(start);
   const endIndex = current.indexOf(end);
   if ((startIndex === -1) !== (endIndex === -1) || endIndex < startIndex) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       'config_conflict',
-      `Malformed batch-tasks managed block (${start})`,
+      `Malformed agent-jobs managed block (${start})`,
     );
   }
   if (
@@ -213,9 +213,9 @@ function replaceManagedBlock(
     (current.indexOf(start, startIndex + start.length) !== -1 ||
       current.indexOf(end, endIndex + end.length) !== -1)
   ) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       'config_conflict',
-      `Multiple batch-tasks managed blocks (${start})`,
+      `Multiple agent-jobs managed blocks (${start})`,
     );
   }
   if (startIndex !== -1) {
@@ -251,7 +251,7 @@ function parseJsonObject(text: string | null, path: string): Record<string, unkn
     if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error();
     return value as Record<string, unknown>;
   } catch {
-    throw new BatchTasksError('config_conflict', `Expected a JSON object in ${path}`, {
+    throw new AgentJobsError('config_conflict', `Expected a JSON object in ${path}`, {
       path,
     });
   }
@@ -274,19 +274,19 @@ function mergeClaudeMcp(
       typeof rawServers !== 'object' ||
       Array.isArray(rawServers))
   ) {
-    throw new BatchTasksError('config_conflict', `mcpServers must be an object in ${path}`);
+    throw new AgentJobsError('config_conflict', `mcpServers must be an object in ${path}`);
   }
   const servers = { ...((rawServers as Record<string, unknown> | undefined) ?? {}) };
-  if (Object.hasOwn(servers, 'batch_tasks')) {
-    const existing = JSON.stringify(servers.batch_tasks);
+  if (Object.hasOwn(servers, 'agent_jobs')) {
+    const existing = JSON.stringify(servers.agent_jobs);
     if (existing !== JSON.stringify(server)) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         'config_conflict',
-        `Refusing to replace unmanaged mcpServers.batch_tasks in ${path}`,
+        `Refusing to replace unmanaged mcpServers.agent_jobs in ${path}`,
       );
     }
   }
-  servers.batch_tasks = server;
+  servers.agent_jobs = server;
   return prettyJson({ ...root, mcpServers: servers });
 }
 
@@ -306,7 +306,7 @@ function mergeClaudeSettings(current: string | null, path: string): string {
     : [];
   return prettyJson({
     ...root,
-    enabledMcpjsonServers: [...new Set([...enabled, 'batch_tasks'])],
+    enabledMcpjsonServers: [...new Set([...enabled, 'agent_jobs'])],
     permissions: {
       ...permissions,
       allow: [...new Set([...allow, ...CLAUDE_ALLOWED_TOOLS])],
@@ -324,14 +324,14 @@ async function resolveRoot(
     const root = resolve(homeDir);
     const kind = await pathInfo(root);
     if (kind !== 'directory') {
-      throw new BatchTasksError('invalid_target', `Global home is not a directory: ${root}`);
+      throw new AgentJobsError('invalid_target', `Global home is not a directory: ${root}`);
     }
     return { root: await realpath(root), scope: 'global', createRoot: false };
   }
   const candidate = resolve(cwd, args.path ?? '.');
   const kind = await pathInfo(candidate);
   if (kind === 'other') {
-    throw new BatchTasksError('invalid_target', `Target must be a directory: ${candidate}`, {
+    throw new AgentJobsError('invalid_target', `Target must be a directory: ${candidate}`, {
       path: candidate,
     });
   }
@@ -344,12 +344,12 @@ async function resolveRoot(
   let ancestor = dirname(candidate);
   while ((await pathInfo(ancestor)) === 'missing') ancestor = dirname(ancestor);
   if ((await pathInfo(ancestor)) !== 'directory') {
-    throw new BatchTasksError('invalid_target', `No writable parent directory for ${candidate}`);
+    throw new AgentJobsError('invalid_target', `No writable parent directory for ${candidate}`);
   }
   try {
     await access(ancestor, fsConstants.W_OK);
   } catch {
-    throw new BatchTasksError('permission_denied', `Parent directory is not writable: ${ancestor}`);
+    throw new AgentJobsError('permission_denied', `Parent directory is not writable: ${ancestor}`);
   }
   return { root: candidate, scope: 'project', createRoot: true };
 }
@@ -362,13 +362,13 @@ function installLocations(
   if (target === 'codex') {
     return scope === 'project'
       ? {
-          skillDir: join(root, '.agents', 'skills', 'batch-tasks'),
+          skillDir: join(root, '.agents', 'skills', 'agent-jobs'),
           agentDir: join(root, '.codex', 'agents'),
           instruction: join(root, 'AGENTS.md'),
           config: join(root, '.codex', 'config.toml'),
         }
       : {
-          skillDir: join(root, '.agents', 'skills', 'batch-tasks'),
+          skillDir: join(root, '.agents', 'skills', 'agent-jobs'),
           agentDir: join(root, '.codex', 'agents'),
           instruction: join(root, '.codex', 'AGENTS.md'),
           config: join(root, '.codex', 'config.toml'),
@@ -376,14 +376,14 @@ function installLocations(
   }
   return scope === 'project'
     ? {
-        skillDir: join(root, '.claude', 'skills', 'batch-tasks'),
+        skillDir: join(root, '.claude', 'skills', 'agent-jobs'),
         agentDir: join(root, '.claude', 'agents'),
         instruction: join(root, 'CLAUDE.md'),
         config: join(root, '.mcp.json'),
         settings: join(root, '.claude', 'settings.local.json'),
       }
     : {
-        skillDir: join(root, '.claude', 'skills', 'batch-tasks'),
+        skillDir: join(root, '.claude', 'skills', 'agent-jobs'),
         agentDir: join(root, '.claude', 'agents'),
         instruction: join(root, '.claude', 'CLAUDE.md'),
         config: join(root, '.claude.json'),
@@ -393,10 +393,10 @@ function installLocations(
 
 async function resolveBundlePath(explicit?: string): Promise<string> {
   if (explicit !== undefined) return resolve(explicit);
-  if (process.env.BATCH_TASKS_BUNDLE_PATH) return resolve(process.env.BATCH_TASKS_BUNDLE_PATH);
+  if (process.env.AGENT_JOBS_BUNDLE_PATH) return resolve(process.env.AGENT_JOBS_BUNDLE_PATH);
   const ownPath = fileURLToPath(import.meta.url);
-  if (basename(ownPath) === 'batch-tasks.mjs') return ownPath;
-  return resolve(dirname(ownPath), '..', 'dist', 'batch-tasks.mjs');
+  if (basename(ownPath) === 'agent-jobs.mjs') return ownPath;
+  return resolve(dirname(ownPath), '..', 'dist', 'agent-jobs.mjs');
 }
 
 async function buildFiles(
@@ -408,7 +408,7 @@ async function buildFiles(
   const files: PlannedFile[] = [];
   for (const target of targets) {
     const locations = installLocations(root, scope, target);
-    const scriptPath = join(locations.skillDir, 'scripts', 'batch-tasks.mjs');
+    const scriptPath = join(locations.skillDir, 'scripts', 'agent-jobs.mjs');
     const instructionCurrent = await fileText(locations.instruction);
     const instructionSkillPath =
       scope === 'project'
@@ -440,7 +440,7 @@ async function buildFiles(
           kind: 'managed',
         },
         {
-          path: join(locations.agentDir, 'batch_worker.toml'),
+          path: join(locations.agentDir, 'agent_job_worker.toml'),
           content: codexWorker(
             scriptPath,
             scope === 'project' ? root : undefined,
@@ -448,7 +448,7 @@ async function buildFiles(
           kind: 'managed',
         },
         {
-          path: join(locations.agentDir, 'batch_postprocessor.toml'),
+          path: join(locations.agentDir, 'agent_job_postprocessor.toml'),
           content: codexPostprocessor(),
           kind: 'managed',
         },
@@ -460,16 +460,16 @@ async function buildFiles(
         CODEX_CONFIG_BLOCK_END,
       );
       if (
-        unmanagedConfig.includes('[mcp_servers.batch_tasks]')
+        unmanagedConfig.includes('[mcp_servers.agent_jobs]')
       ) {
-        throw new BatchTasksError(
+        throw new AgentJobsError(
           'config_conflict',
-          `Refusing to replace unmanaged mcp_servers.batch_tasks in ${locations.config}`,
+          `Refusing to replace unmanaged mcp_servers.agent_jobs in ${locations.config}`,
         );
       }
       const agentsSection = tomlSection(unmanagedConfig, 'agents');
       if (agentsSection !== null && !/^\s*enabled\s*=\s*true\s*$/m.test(agentsSection)) {
-        throw new BatchTasksError(
+        throw new AgentJobsError(
           'config_conflict',
           `Existing [agents] in ${locations.config} must set enabled = true`,
         );
@@ -491,12 +491,12 @@ async function buildFiles(
     } else {
       files.push(
         {
-          path: join(locations.agentDir, 'batch_worker.md'),
+          path: join(locations.agentDir, 'agent_job_worker.md'),
           content: claudeWorker(),
           kind: 'managed',
         },
         {
-          path: join(locations.agentDir, 'batch_postprocessor.md'),
+          path: join(locations.agentDir, 'agent_job_postprocessor.md'),
           content: claudePostprocessor(),
           kind: 'managed',
         },
@@ -521,7 +521,7 @@ async function buildFiles(
 }
 
 function manifestPath(root: string): string {
-  return join(root, '.batch-tasks-agent', 'install-manifest.json');
+  return join(root, '.agent-jobs', 'install-manifest.json');
 }
 
 function targetInstallPaths(
@@ -532,16 +532,16 @@ function targetInstallPaths(
   const paths = new Set<string>();
   const locations = installLocations(root, scope, target);
   paths.add(join(locations.skillDir, 'SKILL.md'));
-  paths.add(join(locations.skillDir, 'scripts', 'batch-tasks.mjs'));
+  paths.add(join(locations.skillDir, 'scripts', 'agent-jobs.mjs'));
   paths.add(locations.instruction);
   paths.add(locations.config);
   if (target === 'codex') {
     paths.add(join(locations.skillDir, 'agents', 'openai.yaml'));
-    paths.add(join(locations.agentDir, 'batch_worker.toml'));
-    paths.add(join(locations.agentDir, 'batch_postprocessor.toml'));
+    paths.add(join(locations.agentDir, 'agent_job_worker.toml'));
+    paths.add(join(locations.agentDir, 'agent_job_postprocessor.toml'));
   } else {
-    paths.add(join(locations.agentDir, 'batch_worker.md'));
-    paths.add(join(locations.agentDir, 'batch_postprocessor.md'));
+    paths.add(join(locations.agentDir, 'agent_job_worker.md'));
+    paths.add(join(locations.agentDir, 'agent_job_postprocessor.md'));
     paths.add(locations.settings!);
   }
   return paths;
@@ -586,7 +586,7 @@ async function readManifest(
     }
     return manifest;
   } catch {
-    throw new BatchTasksError('invalid_manifest', `Invalid install manifest: ${path}`);
+    throw new AgentJobsError('invalid_manifest', `Invalid install manifest: ${path}`);
   }
 }
 
@@ -597,22 +597,22 @@ async function assertWritableTargets(files: PlannedFile[]): Promise<void> {
       try {
         await access(file.path, fsConstants.W_OK);
       } catch {
-        throw new BatchTasksError('permission_denied', `File is not writable: ${file.path}`);
+        throw new AgentJobsError('permission_denied', `File is not writable: ${file.path}`);
       }
       continue;
     }
     if (current === 'directory') {
-      throw new BatchTasksError('invalid_target', `Expected a file path: ${file.path}`);
+      throw new AgentJobsError('invalid_target', `Expected a file path: ${file.path}`);
     }
     let ancestor = dirname(file.path);
     while ((await pathInfo(ancestor)) === 'missing') ancestor = dirname(ancestor);
     if ((await pathInfo(ancestor)) !== 'directory') {
-      throw new BatchTasksError('invalid_target', `File parent is not a directory: ${ancestor}`);
+      throw new AgentJobsError('invalid_target', `File parent is not a directory: ${ancestor}`);
     }
     try {
       await access(ancestor, fsConstants.W_OK);
     } catch {
-      throw new BatchTasksError('permission_denied', `Directory is not writable: ${ancestor}`);
+      throw new AgentJobsError('permission_denied', `Directory is not writable: ${ancestor}`);
     }
   }
 }
@@ -645,9 +645,9 @@ async function preflightFiles(
     if (file.kind === 'merged') {
       const isUnmodifiedInstall =
         entry !== undefined && hash(current) === entry.installed_sha256;
-      if (isUnmodifiedInstall || !isBatchTasksManaged(current)) continue;
+      if (isUnmodifiedInstall || !isAgentJobsManaged(current)) continue;
       if (!force) {
-        throw new BatchTasksError(
+        throw new AgentJobsError(
           'target_conflict',
           `Managed configuration block has local changes: ${file.path}`,
           {
@@ -658,16 +658,16 @@ async function preflightFiles(
       }
       continue;
     }
-    const recognized = entry !== undefined || isBatchTasksManaged(current);
+    const recognized = entry !== undefined || isAgentJobsManaged(current);
     if (!recognized) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         'target_conflict',
         `Refusing to overwrite unmanaged file: ${file.path}`,
         { path: file.path },
       );
     }
     if (!force) {
-      throw new BatchTasksError('target_conflict', `Managed file has local changes: ${file.path}`, {
+      throw new AgentJobsError('target_conflict', `Managed file has local changes: ${file.path}`, {
         path: file.path,
         hint: 'Re-run with --force to back up and replace the managed file.',
       });
@@ -866,14 +866,14 @@ async function createPlan(
   try {
     bundleContent = await readFile(bundlePath, 'utf8');
   } catch {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       'bundle_not_found',
       `Built bundle not found: ${bundlePath}. Run pnpm build before init.`,
       { path: bundlePath },
     );
   }
   if (!bundleContent.startsWith('#!/usr/bin/env node')) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       'invalid_bundle',
       `Bundle is missing its node shebang: ${bundlePath}`,
     );
@@ -897,7 +897,7 @@ function promptText(plan: InstallPlan): string {
     .map((target) => (target === 'codex' ? 'Codex' : 'Claude'))
     .join(', ');
   const create = plan.createRoot ? 'yes' : 'no';
-  return `${verb} batch-tasks?\n\nPath:    ${plan.root}\nCreate:  ${create}\nTargets: ${targets}\nScope:   ${plan.scope}\n\nProceed? [y/N] `;
+  return `${verb} agent-jobs?\n\nPath:    ${plan.root}\nCreate:  ${create}\nTargets: ${targets}\nScope:   ${plan.scope}\n\nProceed? [y/N] `;
 }
 
 async function confirmPlan(plan: InstallPlan, environment: InstallerEnvironment): Promise<boolean> {
@@ -922,12 +922,12 @@ async function confirmPlan(plan: InstallPlan, environment: InstallerEnvironment)
 
 function humanResult(result: InstallerCommandResult): string {
   if (result.status === 'cancelled') return `Cancelled; no files were changed in ${result.path}.\n`;
-  if (result.status === 'not_installed') return `batch-tasks is not installed in ${result.path}.\n`;
+  if (result.status === 'not_installed') return `agent-jobs is not installed in ${result.path}.\n`;
   if (result.status === 'dry_run') {
     return `Dry run for ${result.path}: ${result.changed_files.length} file(s) would change.\n`;
   }
   const verb = result.status === 'initialized' ? 'Initialized' : 'Uninstalled';
-  return `${verb} batch-tasks in ${result.path}; ${result.changed_files.length} file(s) changed.\n`;
+  return `${verb} agent-jobs in ${result.path}; ${result.changed_files.length} file(s) changed.\n`;
 }
 
 export async function runInstallerCommand(

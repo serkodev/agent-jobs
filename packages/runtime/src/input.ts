@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { parse as parseCsv } from "csv-parse/sync";
 import { parseDocument } from "yaml";
 
-import { BatchTasksError } from "./errors.js";
+import { AgentJobsError } from "./errors.js";
 import { parseStrictJson, readUtf8File, type FilePath } from "./storage.js";
 
 export type InputRecord = Record<string, unknown>;
@@ -24,7 +24,7 @@ export async function loadRecords(
     const info = await stat(source);
     if (!info.isFile()) throw new Error("not a regular file");
   } catch {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "input_not_found",
       `Input data does not exist: ${source}`,
       { path: source },
@@ -45,15 +45,15 @@ export async function loadRecords(
     } else if (suffix === ".yaml" || suffix === ".yml") {
       data = parseYaml(await readUtf8File(source));
     } else {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "unsupported_input_format",
         `Unsupported input extension: ${suffix || "<none>"}`,
         { path: source },
       );
     }
   } catch (error) {
-    if (error instanceof BatchTasksError) throw error;
-    throw new BatchTasksError(
+    if (error instanceof AgentJobsError) throw error;
+    throw new AgentJobsError(
       "invalid_input",
       `Could not load input data: ${errorMessage(error)}`,
       { path: source },
@@ -69,7 +69,7 @@ export async function loadRecords(
     data = resolveJsonPointer(data, recordsPath);
   }
   if (!Array.isArray(data)) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "invalid_records",
       "Input records must be a top-level list unless RECORDS_PATH selects a list",
     );
@@ -82,7 +82,7 @@ export async function loadRecords(
     else errors.push({ row: index, message: "record must be an object" });
   }
   if (errors.length > 0) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "invalid_records",
       "One or more records are not objects",
       errors,
@@ -95,7 +95,7 @@ export async function loadRecords(
 export function resolveJsonPointer(document: unknown, pointer: string): unknown {
   if (pointer === "") return document;
   if (!pointer.startsWith("/")) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "invalid_records_path",
       "RECORDS_PATH must be an RFC 6901 JSON Pointer",
     );
@@ -104,7 +104,7 @@ export function resolveJsonPointer(document: unknown, pointer: string): unknown 
   let current = document;
   for (const rawToken of pointer.slice(1).split("/")) {
     if (/~(?![01])/.test(rawToken)) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "invalid_records_path",
         `RECORDS_PATH contains an invalid escape: ${rawToken}`,
       );
@@ -149,7 +149,7 @@ export function resolveJsonPointer(document: unknown, pointer: string): unknown 
 export function canonicalizeId(value: unknown): string {
   if (typeof value === "bigint") return value.toString(10);
   if (typeof value === "string" && value.trim().length > 0) return value;
-  throw new BatchTasksError(
+  throw new AgentJobsError(
     "invalid_id",
     "Row ID must be a non-empty string or integer",
   );
@@ -179,7 +179,7 @@ async function loadJsonl(path: string): Promise<unknown[]> {
     try {
       values.push(parseInputJson(line));
     } catch (error) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "invalid_input",
         `Invalid JSONL on line ${index + 1}: ${errorMessage(error)}`,
         { path, line: index + 1 },
@@ -198,20 +198,20 @@ async function loadCsv(path: string): Promise<InputRecord[]> {
   }) as string[][];
   const header = rows[0];
   if (header === undefined) {
-    throw new BatchTasksError("invalid_input", "CSV input has no header row");
+    throw new AgentJobsError("invalid_input", "CSV input has no header row");
   }
   if (
     header.some((name) => name.length === 0) ||
     new Set(header).size !== header.length
   ) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "invalid_input",
       "CSV header names must be non-empty and unique",
     );
   }
   return rows.slice(1).map((row, index) => {
     if (row.length !== header.length) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "invalid_input",
         `CSV row ${index + 2} has ${row.length} fields; expected ${header.length}`,
         { path, line: index + 2 },
@@ -285,15 +285,15 @@ function resolveInputPath(value: FilePath): string {
 
 function rejectRecordsPath(recordsPath: string | null | undefined, format: string): void {
   if (recordsPath !== undefined && recordsPath !== null && recordsPath !== "") {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "records_path_not_supported",
       `RECORDS_PATH is not supported for ${format} input`,
     );
   }
 }
 
-function pointerNotFound(message: string, pointer: string): BatchTasksError {
-  return new BatchTasksError("records_path_not_found", message, { pointer });
+function pointerNotFound(message: string, pointer: string): AgentJobsError {
+  return new AgentJobsError("records_path_not_found", message, { pointer });
 }
 
 function isRecord(value: unknown): value is InputRecord {

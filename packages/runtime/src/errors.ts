@@ -1,11 +1,11 @@
 /** Expected domain failures with stable, machine-readable error codes. */
-export class BatchTasksError extends Error {
+export class AgentJobsError extends Error {
   readonly code: string;
   readonly details?: unknown;
 
   constructor(code: string, message: string, details?: unknown) {
     super(message);
-    this.name = "BatchTasksError";
+    this.name = "AgentJobsError";
     this.code = code;
     if (details !== undefined && details !== null) {
       this.details = details;
@@ -24,6 +24,6 @@ export class BatchTasksError extends Error {
   }
 }
 
-export function isBatchTasksError(error: unknown): error is BatchTasksError {
-  return error instanceof BatchTasksError;
+export function isAgentJobsError(error: unknown): error is AgentJobsError {
+  return error instanceof AgentJobsError;
 }

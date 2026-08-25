@@ -3,29 +3,29 @@ import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { InMemoryTransport, McpServer } from '@modelcontextprotocol/server';
 import { describe, expect, it, vi } from 'vitest';
 
-import { BatchTasksError } from '../src/errors.js';
+import { AgentJobsError } from '../src/errors.js';
 import {
-  BATCH_TOOL_NAMES,
-  createBatchTasksServer,
+  AGENT_JOBS_TOOL_NAMES,
+  createAgentJobsServer,
   getAssignment,
   reportFailure,
   submitResult,
 } from '../src/mcp-server.js';
-import type { BatchRuntime } from '../src/state.js';
+import type { AgentJobsRuntime } from '../src/state.js';
 import { parseStrictJson } from '../src/storage.js';
 
-function runtimeWith(overrides: Partial<BatchRuntime>): BatchRuntime {
-  return overrides as BatchRuntime;
+function runtimeWith(overrides: Partial<AgentJobsRuntime>): AgentJobsRuntime {
+  return overrides as AgentJobsRuntime;
 }
 
-describe('batch_tasks MCP surface', () => {
+describe('agent_jobs MCP surface', () => {
   it('advertises exactly the three worker capability tools', async () => {
-    expect(BATCH_TOOL_NAMES).toEqual([
+    expect(AGENT_JOBS_TOOL_NAMES).toEqual([
       'get_assignment',
       'submit_result',
       'report_failure',
     ]);
-    expect(new Set(BATCH_TOOL_NAMES).size).toBe(3);
+    expect(new Set(AGENT_JOBS_TOOL_NAMES).size).toBe(3);
     const runtime = runtimeWith({
       getAssignment: vi.fn().mockResolvedValue({
         id: 'one',
@@ -33,7 +33,7 @@ describe('batch_tasks MCP surface', () => {
         diagnostics: { exact_integer: 9007199254740993n },
       }),
     });
-    const server = createBatchTasksServer(runtime);
+    const server = createAgentJobsServer(runtime);
     expect(server).toBeInstanceOf(McpServer);
     const client = new Client({ name: 'batch-tests', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -44,7 +44,7 @@ describe('batch_tasks MCP surface', () => {
         client.connect(clientTransport),
       ]);
       const tools = await client.listTools();
-      expect(tools.tools.map((tool) => tool.name)).toEqual(BATCH_TOOL_NAMES);
+      expect(tools.tools.map((tool) => tool.name)).toEqual(AGENT_JOBS_TOOL_NAMES);
       expect(
         tools.tools.find((tool) => tool.name === 'submit_result')?.inputSchema,
       ).toMatchObject({
@@ -62,7 +62,7 @@ describe('batch_tasks MCP surface', () => {
 
       const result = await client.callTool({
         name: 'get_assignment',
-        arguments: { handle: 'bta_handle' },
+        arguments: { handle: 'aj_handle' },
       });
       expect(result.structuredContent).toBeUndefined();
       expect(result.content).toHaveLength(1);
@@ -99,7 +99,7 @@ describe('batch_tasks MCP surface', () => {
     try {
       await client.connect(transport);
       const tools = await client.listTools();
-      expect(tools.tools.map((tool) => tool.name)).toEqual(BATCH_TOOL_NAMES);
+      expect(tools.tools.map((tool) => tool.name)).toEqual(AGENT_JOBS_TOOL_NAMES);
     } finally {
       await client.close();
     }
@@ -112,11 +112,11 @@ describe('batch_tasks MCP surface', () => {
     });
     const runtime = runtimeWith({ getAssignment: implementation });
 
-    await expect(getAssignment('bta_handle', runtime)).resolves.toEqual({
+    await expect(getAssignment('aj_handle', runtime)).resolves.toEqual({
       id: 'one',
       input: { title: 'One' },
     });
-    expect(implementation).toHaveBeenCalledWith('bta_handle');
+    expect(implementation).toHaveBeenCalledWith('aj_handle');
   });
 
   it('passes pure result objects and failure diagnostics to the runtime', async () => {
@@ -141,7 +141,7 @@ describe('batch_tasks MCP surface', () => {
   it('preserves magic own keys until task-specific output validation', async () => {
     const submit = vi.fn().mockResolvedValue({ id: 'one', committed: true });
     const runtime = runtimeWith({ submitResult: submit });
-    const server = createBatchTasksServer(runtime);
+    const server = createAgentJobsServer(runtime);
     const client = new Client({ name: 'prototype-tests', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const result = JSON.parse(
@@ -155,7 +155,7 @@ describe('batch_tasks MCP surface', () => {
       ]);
       await client.callTool({
         name: 'submit_result',
-        arguments: { handle: 'bta_handle', result },
+        arguments: { handle: 'aj_handle', result },
       });
       const submitted = submit.mock.calls[0]?.[1] as Record<string, unknown>;
       expect(Object.hasOwn(submitted, '__proto__')).toBe(true);
@@ -170,7 +170,7 @@ describe('batch_tasks MCP surface', () => {
   it('parses result_json without losing unsafe integer literals or magic own keys', async () => {
     const submit = vi.fn().mockResolvedValue({ id: 'one', committed: true });
     const runtime = runtimeWith({ submitResult: submit });
-    const server = createBatchTasksServer(runtime);
+    const server = createAgentJobsServer(runtime);
     const client = new Client({ name: 'exact-json-tests', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 
@@ -182,7 +182,7 @@ describe('batch_tasks MCP surface', () => {
       await client.callTool({
         name: 'submit_result',
         arguments: {
-          handle: 'bta_handle',
+          handle: 'aj_handle',
           result_json:
             '{"exact":9223372036854775807,"__proto__":{"kept":true}}',
         },
@@ -203,7 +203,7 @@ describe('batch_tasks MCP surface', () => {
     {
       name: 'both result forms',
       arguments: {
-        handle: 'bta_handle',
+        handle: 'aj_handle',
         result: { summary: 'object' },
         result_json: '{"summary":"text"}',
       },
@@ -211,23 +211,23 @@ describe('batch_tasks MCP surface', () => {
     },
     {
       name: 'neither result form',
-      arguments: { handle: 'bta_handle' },
+      arguments: { handle: 'aj_handle' },
       expected: /exactly one|invalid params/i,
     },
     {
       name: 'invalid JSON text',
-      arguments: { handle: 'bta_handle', result_json: '{' },
+      arguments: { handle: 'aj_handle', result_json: '{' },
       expected: /invalid_result_json|valid strict JSON/i,
     },
     {
       name: 'non-object JSON text',
-      arguments: { handle: 'bta_handle', result_json: '[1,2,3]' },
+      arguments: { handle: 'aj_handle', result_json: '[1,2,3]' },
       expected: /invalid_result_json|JSON object/i,
     },
   ])('rejects $name', async ({ arguments: toolArguments, expected }) => {
     const submit = vi.fn().mockResolvedValue({ id: 'one', committed: true });
     const runtime = runtimeWith({ submitResult: submit });
-    const server = createBatchTasksServer(runtime);
+    const server = createAgentJobsServer(runtime);
     const client = new Client({ name: 'invalid-json-tests', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 
@@ -263,7 +263,7 @@ describe('batch_tasks MCP surface', () => {
       getAssignment: vi
         .fn()
         .mockRejectedValue(
-          new BatchTasksError('handle_consumed', 'Handle was already consumed'),
+          new AgentJobsError('handle_consumed', 'Handle was already consumed'),
         ),
     });
 

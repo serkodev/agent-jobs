@@ -1,11 +1,11 @@
 ---
-name: batch-tasks
+name: agent-jobs
 description: Run a resumable, schema-validated batch from INPUT_DATA, TASK_SPEC, ID_COLUMN_KEY, and OUTPUT_DIR prompt markers using isolated {{HOST}} row workers. Use only for marker-defined batch runs, not ordinary one-off data edits.
 ---
 
-<!-- Managed by batch-tasks-agent. Re-run `batch-tasks init` to update. -->
+<!-- Managed by agent-jobs. Re-run `agent-jobs init` to update. -->
 
-# Batch tasks
+# Agent Jobs
 
 Orchestrate the batch; never do row work in the parent context. The installed CLI is
 the source of truth for validation, queue state, retries, paths, and completion.
@@ -24,8 +24,8 @@ row worker.
 
 ## Check the installation
 
-Run `{{BATCH_TASKS_CLI}} doctor` before prepare. If its installation check reports
-`init_required`, stop and tell the user to run `batch-tasks init`; a skill-only
+Run `{{AGENT_JOBS_CLI}} doctor` before prepare. If its installation check reports
+`init_required`, stop and tell the user to run `agent-jobs init`; a skill-only
 install cannot register the required agents and MCP server.
 
 ## Prepare
@@ -33,7 +33,7 @@ install cannot register the required agents and MCP server.
 Run, adding only flags represented by optional markers:
 
 ```text
-{{BATCH_TASKS_CLI}} prepare --input-data <INPUT_DATA> --task-spec <TASK_SPEC> \
+{{AGENT_JOBS_CLI}} prepare --input-data <INPUT_DATA> --task-spec <TASK_SPEC> \
   --id-column-key <ID_COLUMN_KEY> --output-dir <OUTPUT_DIR> \
   [--records-path <RECORDS_PATH>] [--model <MODEL>] \
   [--reasoning-effort <REASONING_EFFORT>] [--max-concurrency <N>] \
@@ -52,7 +52,7 @@ Never independently read or revalidate the full input or task specification.
 Request only the currently available capacity:
 
 ```text
-{{BATCH_TASKS_CLI}} next --output-dir <OUTPUT_DIR> --invocation-id <ID> --count <N>
+{{AGENT_JOBS_CLI}} next --output-dir <OUTPUT_DIR> --invocation-id <ID> --count <N>
 ```
 
 {{WORKER_ORCHESTRATION}}
@@ -62,7 +62,7 @@ The worker message contains only:
 ```text
 Process exactly one opaque batch assignment.
 ASSIGNMENT_HANDLE: <handle>
-Use only batch_tasks: get_assignment(handle), then submit_result(handle, result_json)
+Use only agent_jobs: get_assignment(handle), then submit_result(handle, result_json)
 or report_failure(handle, code, message). Return only an acknowledgement.
 ```
 
@@ -76,7 +76,7 @@ there are no pending or active records.
 Always run:
 
 ```text
-{{BATCH_TASKS_CLI}} validate --output-dir <OUTPUT_DIR> --invocation-id <ID>
+{{AGENT_JOBS_CLI}} validate --output-dir <OUTPUT_DIR> --invocation-id <ID>
 ```
 
 With `ON_ERROR: stop`, validation errors prevent collection and post-processing.
@@ -84,10 +84,10 @@ With `continue_successes`, collection may contain only successful valid rows. Un
 the resolved format is `none`, run:
 
 ```text
-{{BATCH_TASKS_CLI}} collect --output-dir <OUTPUT_DIR> --invocation-id <ID> --format <FORMAT>
+{{AGENT_JOBS_CLI}} collect --output-dir <OUTPUT_DIR> --invocation-id <ID> --format <FORMAT>
 ```
 
-If marker-free prose requests synthesis, start one fresh `batch_postprocessor` only
+If marker-free prose requests synthesis, start one fresh `agent_job_postprocessor` only
 after validation and collection. Give it only the collection path, the prose, and the
 validation/partial-success statement. Never give it raw run files.
 

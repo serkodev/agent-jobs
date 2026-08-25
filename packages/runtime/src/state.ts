@@ -13,7 +13,7 @@ import {
 } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { BatchTasksError } from "./errors.js";
+import { AgentJobsError } from "./errors.js";
 import {
   canonicalizeId,
   loadRecords,
@@ -36,8 +36,8 @@ import {
 } from "./storage.js";
 
 export const STATE_VERSION = 1;
-const HANDLE_PREFIX = "bta_";
-const HANDLE_PATTERN = /^bta_[A-Za-z0-9_-]{32,}$/;
+const HANDLE_PREFIX = "aj_";
+const HANDLE_PATTERN = /^aj_[A-Za-z0-9_-]{32,}$/;
 const INVOCATION_PATTERN = /^[0-9a-f]{32}$/;
 const ACTIVE_STATUSES = new Set<RecordStatus>(["leased", "running"]);
 const TERMINAL_STATUSES = new Set<RecordStatus>([
@@ -68,7 +68,7 @@ export type RecordStatus =
 type JsonObject = Record<string, unknown>;
 type JsonSchema = Record<string, unknown>;
 
-export interface BatchRuntimeOptions {
+export interface AgentJobsRuntimeOptions {
   registryDir?: PathInput;
   projectRoot?: PathInput;
 }
@@ -178,16 +178,16 @@ export interface QueueCounts extends JsonObject {
  * Coordinate durable row assignments while keeping complete row data out of the
  * parent conversation. All mutating operations are serialized per invocation.
  */
-export class BatchRuntime {
+export class AgentJobsRuntime {
   public readonly registryDir: string;
   public readonly projectRoot: string;
 
-  public constructor(options: BatchRuntimeOptions | PathInput = {}) {
+  public constructor(options: AgentJobsRuntimeOptions | PathInput = {}) {
     const structured =
       typeof options === "string" || options instanceof URL ? {} : options;
     this.projectRoot = absolutePath(
       structured.projectRoot ??
-        process.env.BATCH_TASKS_PROJECT_DIR ??
+        process.env.AGENT_JOBS_PROJECT_DIR ??
         process.env.CLAUDE_PROJECT_DIR ??
         process.cwd(),
     );
@@ -197,8 +197,8 @@ export class BatchRuntime {
         : options.registryDir;
     const configured =
       explicit ??
-      process.env.BATCH_TASKS_REGISTRY_DIR ??
-      join(this.projectRoot, ".batch-tasks-agent", "handles");
+      process.env.AGENT_JOBS_REGISTRY_DIR ??
+      join(this.projectRoot, ".agent-jobs", "handles");
     this.registryDir = absolutePath(configured);
   }
 
@@ -339,7 +339,7 @@ export class BatchRuntime {
   ): Promise<JsonObject> {
     const requested = options.count ?? 1;
     if (!Number.isInteger(requested) || requested < 1) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "invalid_count",
         "count must be a positive integer",
       );
@@ -402,13 +402,13 @@ export class BatchRuntime {
       await ensureStateOutputLayout(state);
       const record = recordForRegistry(state, registry, handle);
       if (record.status === "running") {
-        throw new BatchTasksError(
+        throw new AgentJobsError(
           "handle_consumed",
           "This assignment handle was already retrieved",
         );
       }
       if (record.status !== "leased") {
-        throw new BatchTasksError(
+        throw new AgentJobsError(
           "invalid_handle",
           "This assignment handle is no longer active",
         );
@@ -442,7 +442,7 @@ export class BatchRuntime {
   /** Validate and atomically publish a pure row result without overwriting. */
   public async submitResult(handle: string, result: unknown): Promise<JsonObject> {
     if (!isObject(result)) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "output_validation_failed",
         "Worker result must be a JSON object",
         [{ path: "", message: "result is not an object" }],
@@ -450,7 +450,7 @@ export class BatchRuntime {
     }
     const jsonProblem = strictJsonProblem(result);
     if (jsonProblem !== null) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "output_validation_failed",
         "Worker result must contain only strict JSON values",
         [{ path: "", message: jsonProblem, validator: "json" }],
@@ -467,14 +467,14 @@ export class BatchRuntime {
         const code = TERMINAL_STATUSES.has(record.status)
           ? "handle_consumed"
           : "invalid_handle";
-        throw new BatchTasksError(
+        throw new AgentJobsError(
           code,
           "This assignment handle cannot submit a result",
         );
       }
       const errors = validationErrors(result, state.spec.output_schema);
       if (errors.length > 0) {
-        throw new BatchTasksError(
+        throw new AgentJobsError(
           "output_validation_failed",
           "Worker result does not satisfy output_schema",
           errors,
@@ -486,8 +486,8 @@ export class BatchRuntime {
         await ensureStateOutputLayout(state);
         await atomicWriteJson(runPath, result, { noClobber: true });
       } catch (error) {
-        if (error instanceof BatchTasksError && error.code === "target_exists") {
-          throw new BatchTasksError(
+        if (error instanceof AgentJobsError && error.code === "target_exists") {
+          throw new AgentJobsError(
             "output_exists",
             "A result already exists for this row; refusing to overwrite it",
             error.details,
@@ -520,13 +520,13 @@ export class BatchRuntime {
     message: string,
   ): Promise<JsonObject> {
     if (typeof code !== "string" || code.trim().length === 0) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "invalid_failure",
         "Failure code must be non-empty",
       );
     }
     if (typeof message !== "string" || message.trim().length === 0) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "invalid_failure",
         "Failure message must be non-empty",
       );
@@ -538,7 +538,7 @@ export class BatchRuntime {
       await ensureStateOutputLayout(state);
       const record = recordForRegistry(state, registry, handle);
       if (!ACTIVE_STATUSES.has(record.status)) {
-        throw new BatchTasksError(
+        throw new AgentJobsError(
           "handle_consumed",
           "This assignment handle is no longer active",
         );
@@ -656,7 +656,7 @@ export class BatchRuntime {
       const selectedFormat =
         options.format ?? state.settings.collect_format;
       if (!COLLECT_FORMATS.has(selectedFormat)) {
-        throw new BatchTasksError(
+        throw new AgentJobsError(
           "invalid_collect_format",
           "format must be none, json, jsonl, or csv",
         );
@@ -668,7 +668,7 @@ export class BatchRuntime {
       await ensureStateOutputLayout(state);
       await atomicWriteJson(join(state.output_dir, "report.json"), report);
       if (!report.valid && state.settings.on_error === "stop") {
-        throw new BatchTasksError(
+        throw new AgentJobsError(
           "batch_failed",
           "Collection is blocked because final validation failed",
           report.errors,
@@ -735,27 +735,27 @@ export class BatchRuntime {
           paths: [
             join(this.projectRoot, "AGENTS.md"),
             join(this.projectRoot, ".codex", "config.toml"),
-            join(this.projectRoot, ".codex", "agents", "batch_worker.toml"),
+            join(this.projectRoot, ".codex", "agents", "agent_job_worker.toml"),
             join(
               this.projectRoot,
               ".codex",
               "agents",
-              "batch_postprocessor.toml",
+              "agent_job_postprocessor.toml",
             ),
             join(
               this.projectRoot,
               ".agents",
               "skills",
-              "batch-tasks",
+              "agent-jobs",
               "SKILL.md",
             ),
             join(
               this.projectRoot,
               ".agents",
               "skills",
-              "batch-tasks",
+              "agent-jobs",
               "scripts",
-              "batch-tasks.mjs",
+              "agent-jobs.mjs",
             ),
           ],
         },
@@ -764,16 +764,16 @@ export class BatchRuntime {
           paths: [
             join(userHome, ".codex", "AGENTS.md"),
             join(userHome, ".codex", "config.toml"),
-            join(userHome, ".codex", "agents", "batch_worker.toml"),
-            join(userHome, ".codex", "agents", "batch_postprocessor.toml"),
-            join(userHome, ".agents", "skills", "batch-tasks", "SKILL.md"),
+            join(userHome, ".codex", "agents", "agent_job_worker.toml"),
+            join(userHome, ".codex", "agents", "agent_job_postprocessor.toml"),
+            join(userHome, ".agents", "skills", "agent-jobs", "SKILL.md"),
             join(
               userHome,
               ".agents",
               "skills",
-              "batch-tasks",
+              "agent-jobs",
               "scripts",
-              "batch-tasks.mjs",
+              "agent-jobs.mjs",
             ),
           ],
         },
@@ -782,21 +782,21 @@ export class BatchRuntime {
           paths: [
             join(this.projectRoot, "AGENTS.md"),
             join(this.projectRoot, ".codex", "config.toml"),
-            join(this.projectRoot, ".codex", "agents", "batch_worker.toml"),
+            join(this.projectRoot, ".codex", "agents", "agent_job_worker.toml"),
             join(
               this.projectRoot,
               ".codex",
               "agents",
-              "batch_postprocessor.toml",
+              "agent_job_postprocessor.toml",
             ),
             join(
               this.projectRoot,
               ".agents",
               "skills",
-              "batch-tasks",
+              "agent-jobs",
               "SKILL.md",
             ),
-            join(this.projectRoot, "dist", "batch-tasks.mjs"),
+            join(this.projectRoot, "dist", "agent-jobs.mjs"),
           ],
         },
       ],
@@ -807,27 +807,27 @@ export class BatchRuntime {
             join(this.projectRoot, "CLAUDE.md"),
             join(this.projectRoot, ".mcp.json"),
             join(this.projectRoot, ".claude", "settings.local.json"),
-            join(this.projectRoot, ".claude", "agents", "batch_worker.md"),
+            join(this.projectRoot, ".claude", "agents", "agent_job_worker.md"),
             join(
               this.projectRoot,
               ".claude",
               "agents",
-              "batch_postprocessor.md",
+              "agent_job_postprocessor.md",
             ),
             join(
               this.projectRoot,
               ".claude",
               "skills",
-              "batch-tasks",
+              "agent-jobs",
               "SKILL.md",
             ),
             join(
               this.projectRoot,
               ".claude",
               "skills",
-              "batch-tasks",
+              "agent-jobs",
               "scripts",
-              "batch-tasks.mjs",
+              "agent-jobs.mjs",
             ),
           ],
         },
@@ -837,16 +837,16 @@ export class BatchRuntime {
             join(userHome, ".claude", "CLAUDE.md"),
             join(userHome, ".claude.json"),
             join(userHome, ".claude", "settings.json"),
-            join(userHome, ".claude", "agents", "batch_worker.md"),
-            join(userHome, ".claude", "agents", "batch_postprocessor.md"),
-            join(userHome, ".claude", "skills", "batch-tasks", "SKILL.md"),
+            join(userHome, ".claude", "agents", "agent_job_worker.md"),
+            join(userHome, ".claude", "agents", "agent_job_postprocessor.md"),
+            join(userHome, ".claude", "skills", "agent-jobs", "SKILL.md"),
             join(
               userHome,
               ".claude",
               "skills",
-              "batch-tasks",
+              "agent-jobs",
               "scripts",
-              "batch-tasks.mjs",
+              "agent-jobs.mjs",
             ),
           ],
         },
@@ -881,7 +881,7 @@ export class BatchRuntime {
         hosts: installation,
         hint: installed
           ? null
-          : "Run batch-tasks init --yes (or use the published/local npx package).",
+          : "Run agent-jobs init --yes (or use the published/local npx package).",
       },
     });
 
@@ -915,7 +915,7 @@ export class BatchRuntime {
           name: "task_spec",
           ok: false,
           detail:
-            error instanceof BatchTasksError
+            error instanceof AgentJobsError
               ? error.asDict()
               : errorMessage(error),
         });
@@ -930,7 +930,7 @@ export class BatchRuntime {
           name: "output_dir",
           ok: false,
           detail:
-            error instanceof BatchTasksError
+            error instanceof AgentJobsError
               ? error.asDict()
               : errorMessage(error),
         });
@@ -971,7 +971,7 @@ export class BatchRuntime {
         try {
           identifier = canonicalizeId(source[idColumnKey]);
         } catch (error) {
-          if (!(error instanceof BatchTasksError)) throw error;
+          if (!(error instanceof AgentJobsError)) throw error;
           diagnostics.push({
             row: index,
             code: error.code,
@@ -1052,7 +1052,7 @@ export class BatchRuntime {
         diagnostics.length === duplicateDiagnostics.length
           ? "duplicate_id"
           : "input_validation_failed";
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         code,
         "Input preflight failed; no workers were scheduled",
         diagnostics,
@@ -1074,7 +1074,7 @@ export class BatchRuntime {
       typeof options.idColumnKey !== "string" ||
       options.idColumnKey.trim().length === 0
     ) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "invalid_id_column_key",
         "id_column_key must be non-empty",
       );
@@ -1085,7 +1085,7 @@ export class BatchRuntime {
         !Number.isInteger(options.maxConcurrency) ||
         options.maxConcurrency < 1)
     ) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "invalid_max_concurrency",
         "max_concurrency must be positive",
       );
@@ -1095,13 +1095,13 @@ export class BatchRuntime {
       !Number.isInteger(options.maxRetries) ||
       options.maxRetries < 0
     ) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "invalid_max_retries",
         "max_retries must be non-negative",
       );
     }
     if (typeof options.retryInvalid !== "boolean") {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "invalid_retry_invalid",
         "retry_invalid must be a boolean",
       );
@@ -1110,7 +1110,7 @@ export class BatchRuntime {
       options.onError !== "stop" &&
       options.onError !== "continue_successes"
     ) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "invalid_on_error",
         "on_error must be stop or continue_successes",
       );
@@ -1119,7 +1119,7 @@ export class BatchRuntime {
       typeof options.collectFormat !== "string" ||
       !COLLECT_FORMATS.has(options.collectFormat as CollectFormat)
     ) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "invalid_collect_format",
         "collect_format must be none, json, jsonl, or csv",
       );
@@ -1130,7 +1130,7 @@ export class BatchRuntime {
         (typeof value !== "string" ||
           (name !== "recordsPath" && value.trim().length === 0))
       ) {
-        throw new BatchTasksError(
+        throw new AgentJobsError(
           "invalid_option",
           `${camelToSnake(name)} must be a non-empty string`,
         );
@@ -1148,7 +1148,7 @@ export class BatchRuntime {
     if (selected === null) {
       const pointerPath = join(destination, ".batch", "current.json");
       if (!(await managedFileExists(pointerPath))) {
-        throw new BatchTasksError(
+        throw new AgentJobsError(
           "invocation_not_found",
           `No current invocation exists in ${destination}`,
         );
@@ -1157,7 +1157,7 @@ export class BatchRuntime {
       selected = isObject(pointer) ? pointer.invocation_id : null;
     }
     if (typeof selected !== "string" || !INVOCATION_PATTERN.test(selected)) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "invalid_invocation_id",
         "Invalid invocation ID",
       );
@@ -1169,7 +1169,7 @@ export class BatchRuntime {
       `${selected}.json`,
     );
     if (!(await managedFileExists(path))) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "invocation_not_found",
         `Invocation does not exist: ${selected}`,
         { path },
@@ -1181,13 +1181,13 @@ export class BatchRuntime {
   private async readState(path: string): Promise<InvocationState> {
     const value = await readJson(path);
     if (!isObject(value) || value.state_version !== STATE_VERSION) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "invalid_invocation",
         "Invocation state is missing or incompatible",
       );
     }
     if (!Array.isArray(value.records)) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "invalid_invocation",
         "Invocation records are invalid",
       );
@@ -1210,7 +1210,7 @@ export class BatchRuntime {
 
   private registryPath(handle: string): string {
     if (typeof handle !== "string" || !HANDLE_PATTERN.test(handle)) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "invalid_handle",
         "Assignment handle is invalid",
       );
@@ -1221,7 +1221,7 @@ export class BatchRuntime {
   private async readRegistry(handle: string): Promise<RegistryEntry> {
     const path = this.registryPath(handle);
     if (!(await pathExists(path))) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "invalid_handle",
         "Assignment handle is unknown or expired",
       );
@@ -1234,7 +1234,7 @@ export class BatchRuntime {
       typeof value.state_path !== "string" ||
       !Number.isInteger(value.record_index)
     ) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "invalid_handle",
         "Assignment registry entry is invalid",
       );
@@ -1253,7 +1253,7 @@ export class BatchRuntime {
       basename(dirname(statePath)) !== "invocations" ||
       basename(dirname(dirname(statePath))) !== ".batch"
     ) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "invalid_handle",
         "Handle state path is invalid",
       );
@@ -1266,7 +1266,7 @@ export class BatchRuntime {
       `${invocationId}.json`,
     );
     if (statePath !== expected) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "invalid_handle",
         "Handle state path is invalid",
       );
@@ -1285,7 +1285,7 @@ export class BatchRuntime {
       const value = await readJson(path);
       return validationErrors(value, schema);
     } catch (error) {
-      if (error instanceof BatchTasksError) {
+      if (error instanceof AgentJobsError) {
         return [{ path: "", message: error.message, validator: "json" }];
       }
       throw error;
@@ -1451,18 +1451,18 @@ function recordForRegistry(
   handle: string,
 ): InvocationRecord {
   if (state.invocation_id !== registry.invocation_id) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "invalid_handle",
       "Handle invocation does not match",
     );
   }
   const index = registry.record_index;
   if (index < 0 || index >= state.records.length) {
-    throw new BatchTasksError("invalid_handle", "Handle row does not exist");
+    throw new AgentJobsError("invalid_handle", "Handle row does not exist");
   }
   const record = state.records[index];
   if (record === undefined || record.index !== index || record.handle !== handle) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "invalid_handle",
       "Handle is no longer current",
     );
@@ -1593,13 +1593,13 @@ async function ensureOutputLayout(
 
 async function ensureStateOutputLayout(state: InvocationState): Promise<void> {
   if (typeof state.output_dir !== "string" || state.output_dir.length === 0) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "invalid_invocation",
       "Invocation output_dir is missing or invalid",
     );
   }
   if (!isAbsolute(state.output_dir)) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "invalid_invocation",
       "Invocation output_dir must be absolute",
     );
@@ -1630,7 +1630,7 @@ async function ensureRealDirectory(
       throw unsafeInspectionError("directory", path, error);
     }
     if (!create) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "unsafe_output_path",
         `Managed output directory is missing: ${path}`,
         { path, reason: "missing" },
@@ -1640,7 +1640,7 @@ async function ensureRealDirectory(
       await mkdir(path, { recursive: parents });
     } catch (mkdirError) {
       if (!isAlreadyExistsError(mkdirError)) {
-        throw new BatchTasksError(
+        throw new AgentJobsError(
           "unsafe_output_path",
           `Could not create managed output directory: ${path}`,
           { path, reason: errorMessage(mkdirError) },
@@ -1658,7 +1658,7 @@ async function ensureRealDirectory(
   if (metadata.isSymbolicLink()) reason = "symlink";
   else if (!metadata.isDirectory()) reason = "not_directory";
   if (reason !== null) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "unsafe_output_path",
       `Managed output path must be a real directory: ${path}`,
       { path, reason },
@@ -1672,7 +1672,7 @@ async function ensureRealFile(path: string): Promise<void> {
     metadata = await lstat(path);
   } catch (error) {
     if (isMissingFileError(error)) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "storage_not_found",
         `Managed output file does not exist: ${path}`,
         { path },
@@ -1684,7 +1684,7 @@ async function ensureRealFile(path: string): Promise<void> {
   if (metadata.isSymbolicLink()) reason = "symlink";
   else if (!metadata.isFile()) reason = "not_regular_file";
   if (reason !== null) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "unsafe_output_path",
       `Managed output path must be a real file: ${path}`,
       { path, reason },
@@ -1717,8 +1717,8 @@ function unsafeInspectionError(
   kind: "directory" | "file",
   path: string,
   error: unknown,
-): BatchTasksError {
-  return new BatchTasksError(
+): AgentJobsError {
+  return new AgentJobsError(
     "unsafe_output_path",
     `Could not inspect managed output ${kind}: ${path}`,
     { path, reason: errorMessage(error) },
@@ -1803,7 +1803,7 @@ async function canonicalPath(input: PathInput): Promise<string> {
       return resolve(existing, ...unresolved.toReversed());
     } catch (error) {
       if (!isMissingFileError(error) && !hasNodeCode(error, "ENOTDIR")) {
-        throw new BatchTasksError(
+        throw new AgentJobsError(
           "unsafe_output_path",
           `Could not resolve managed output path: ${cursor}`,
           { path: cursor, reason: errorMessage(error) },
@@ -1811,7 +1811,7 @@ async function canonicalPath(input: PathInput): Promise<string> {
       }
       const parent = dirname(cursor);
       if (parent === cursor) {
-        throw new BatchTasksError(
+        throw new AgentJobsError(
           "unsafe_output_path",
           `Could not resolve managed output path: ${candidate}`,
           { path: candidate, reason: errorMessage(error) },

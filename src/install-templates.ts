@@ -1,9 +1,9 @@
-import claudePostprocessorMarkdown from '../templates/install/claude/agents/batch_postprocessor.md?raw';
-import claudeWorkerMarkdown from '../templates/install/claude/agents/batch_worker.md?raw';
+import claudePostprocessorMarkdown from '../templates/install/claude/agents/agent_job_postprocessor.md?raw';
+import claudeWorkerMarkdown from '../templates/install/claude/agents/agent_job_worker.md?raw';
 import claudeWorkerOrchestration from '../templates/install/claude/worker-orchestration.md?raw';
 import codexAgentsEnabledToml from '../templates/install/codex/agents-enabled.toml?raw';
-import codexPostprocessorToml from '../templates/install/codex/agents/batch_postprocessor.toml?raw';
-import codexWorkerToml from '../templates/install/codex/agents/batch_worker.toml?raw';
+import codexPostprocessorToml from '../templates/install/codex/agents/agent_job_postprocessor.toml?raw';
+import codexWorkerToml from '../templates/install/codex/agents/agent_job_worker.toml?raw';
 import codexConfigToml from '../templates/install/codex/config.toml?raw';
 import codexProjectEnvToml from '../templates/install/codex/project-env.toml?raw';
 import codexWorkerOrchestration from '../templates/install/codex/worker-orchestration.md?raw';
@@ -34,10 +34,10 @@ function renderTemplate(
   });
 }
 
-export const AGENTS_BLOCK_START = '<!-- batch-tasks-agent:start -->';
-export const AGENTS_BLOCK_END = '<!-- batch-tasks-agent:end -->';
-export const CODEX_CONFIG_BLOCK_START = '# batch-tasks-agent:start';
-export const CODEX_CONFIG_BLOCK_END = '# batch-tasks-agent:end';
+export const AGENTS_BLOCK_START = '<!-- agent-jobs:start -->';
+export const AGENTS_BLOCK_END = '<!-- agent-jobs:end -->';
+export const CODEX_CONFIG_BLOCK_START = '# agent-jobs:start';
+export const CODEX_CONFIG_BLOCK_END = '# agent-jobs:end';
 
 export function routingBlock(host: 'codex' | 'claude', skillPath: string): string {
   return renderTemplate(routingBlockMarkdown, {
@@ -48,7 +48,7 @@ export function routingBlock(host: 'codex' | 'claude', skillPath: string): strin
 
 export function codexSkill(scriptPath: string): string {
   return renderTemplate(sharedSkillMarkdown, {
-    BATCH_TASKS_CLI: command(scriptPath),
+    AGENT_JOBS_CLI: command(scriptPath),
     HOST: 'Codex',
     WORKER_ORCHESTRATION: codexWorkerOrchestration.trimEnd(),
   });
@@ -56,7 +56,7 @@ export function codexSkill(scriptPath: string): string {
 
 export function claudeSkill(scriptPath: string): string {
   return renderTemplate(sharedSkillMarkdown, {
-    BATCH_TASKS_CLI: command(scriptPath),
+    AGENT_JOBS_CLI: command(scriptPath),
     HOST: 'Claude',
     WORKER_ORCHESTRATION: claudeWorkerOrchestration.trimEnd(),
   });
@@ -109,16 +109,16 @@ export function claudeMcpServer(scriptPath: string, projectRoot?: string): Recor
     type: 'stdio',
     command: 'node',
     args: [scriptPath, 'mcp'],
-    ...(projectRoot ? { env: { BATCH_TASKS_PROJECT_DIR: projectRoot } } : {}),
+    ...(projectRoot ? { env: { AGENT_JOBS_PROJECT_DIR: projectRoot } } : {}),
   };
 }
 
 export const CLAUDE_ALLOWED_TOOLS = [
-  'mcp__batch_tasks__get_assignment',
-  'mcp__batch_tasks__submit_result',
-  'mcp__batch_tasks__report_failure',
+  'mcp__agent_jobs__get_assignment',
+  'mcp__agent_jobs__submit_result',
+  'mcp__agent_jobs__report_failure',
 ];
 
-export function isBatchTasksManaged(text: string): boolean {
-  return text.includes('Managed by batch-tasks-agent') || text.includes(AGENTS_BLOCK_START);
+export function isAgentJobsManaged(text: string): boolean {
+  return text.includes('Managed by agent-jobs') || text.includes(AGENTS_BLOCK_START);
 }

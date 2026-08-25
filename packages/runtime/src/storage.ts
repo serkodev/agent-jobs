@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 
 import { JSONParse, JSONStringify } from "json-with-bigint";
 
-import { BatchTasksError } from "./errors.js";
+import { AgentJobsError } from "./errors.js";
 
 export type FilePath = string | URL;
 export interface StrictJsonStringifyOptions {
@@ -85,7 +85,7 @@ export async function withLock<T>(
   const path = toPath(lockPath);
   const timeoutMs = options.timeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS;
   if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "invalid_lock_timeout",
       "Filesystem lock timeout must be a finite non-negative number",
       { path, timeout_ms: timeoutMs },
@@ -117,7 +117,7 @@ export async function withLock<T>(
     }
     return result as T;
   } catch (error) {
-    if (error instanceof BatchTasksError) {
+    if (error instanceof AgentJobsError) {
       throw error;
     }
     if (acquired) {
@@ -135,7 +135,7 @@ export async function readJson(path: FilePath): Promise<unknown> {
     text = await readUtf8File(source);
   } catch (error) {
     if (hasCode(error, "ENOENT")) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "storage_not_found",
         `JSON file does not exist: ${source}`,
         { path: source },
@@ -154,7 +154,7 @@ export async function readJson(path: FilePath): Promise<unknown> {
       details.line = location.line;
       details.column = location.column;
     }
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "invalid_json",
       `Invalid JSON in ${source}: ${errorMessage(error)}`,
       details,
@@ -173,7 +173,7 @@ export async function atomicWriteJson(
   try {
     text = stringifyStrictJson(data, { pretty: true, sortKeys: true });
   } catch (error) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "json_not_serializable",
       `Value cannot be encoded as strict JSON: ${errorMessage(error)}`,
       { path: destination },
@@ -208,7 +208,7 @@ export async function atomicWriteText(
         await link(temporary, destination);
       } catch (error) {
         if (hasCode(error, "EEXIST")) {
-          throw new BatchTasksError(
+          throw new AgentJobsError(
             "target_exists",
             `Refusing to overwrite existing file: ${destination}`,
             { path: destination },
@@ -225,7 +225,7 @@ export async function atomicWriteText(
       await fsyncDirectory(parent);
     }
   } catch (error) {
-    if (error instanceof BatchTasksError) {
+    if (error instanceof AgentJobsError) {
       throw error;
     }
     throw ioError(
@@ -255,7 +255,7 @@ export async function atomicMove(
   try {
     const info = await lstat(origin);
     if (!info.isFile() || info.isSymbolicLink()) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "storage_error",
         `Source must be a regular file: ${origin}`,
         { path: target, source: origin },
@@ -267,18 +267,18 @@ export async function atomicMove(
     await unlink(origin);
     await fsyncDirectory(dirname(origin));
   } catch (error) {
-    if (error instanceof BatchTasksError) {
+    if (error instanceof AgentJobsError) {
       throw error;
     }
     if (hasCode(error, "EEXIST")) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "target_exists",
         `Refusing to overwrite existing file: ${target}`,
         { path: target },
       );
     }
     if (hasCode(error, "ENOENT")) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "storage_not_found",
         `Source file does not exist: ${origin}`,
         { path: origin },
@@ -409,7 +409,7 @@ async function ensureLockAnchor(path: string): Promise<void> {
   try {
     const info = await lstat(path);
     if (info.isSymbolicLink() || !info.isFile()) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "lock_error",
         `Filesystem lock path must be a regular file: ${path}`,
         { path },
@@ -427,7 +427,7 @@ async function ensureLockAnchor(path: string): Promise<void> {
     if (!hasCode(error, "EEXIST")) throw error;
     const info = await lstat(path);
     if (info.isSymbolicLink() || !info.isFile()) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "lock_error",
         `Filesystem lock path must be a regular file: ${path}`,
         { path },
@@ -459,7 +459,7 @@ async function acquireOwnedLock(
   try {
     const candidateInfo = await inspectLockFile(candidate);
     if (candidateInfo === null) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "lock_error",
         `Prepared lock owner disappeared: ${candidate}`,
         { path: candidate },
@@ -505,7 +505,7 @@ async function acquireOwnedLock(
       }
       const currentOwner = await readLockOwner(lockFile);
       if (currentOwner === null || currentOwner.token !== owner.token) {
-        throw new BatchTasksError(
+        throw new AgentJobsError(
           "lock_error",
           `Filesystem lock ownership changed during acquisition: ${lockFile}`,
           { path: lockFile },
@@ -554,14 +554,14 @@ async function assertOwnedLock(
   const info = await inspectLockFile(lockFile);
   const owner = await readLockOwner(lockFile);
   if (info === null || !sameLockIdentity(info, identity)) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "lock_error",
       `Filesystem lock identity changed before release: ${lockFile}`,
       { path: lockFile },
     );
   }
   if (owner === null || owner.token !== expected.token || owner.pid !== expected.pid) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "lock_error",
       `Filesystem lock ownership changed before release: ${lockFile}`,
       { path: lockFile },
@@ -591,7 +591,7 @@ async function recoverAbandonedLock(
   try {
     await atomicWriteJson(recoveryClaim, claimant, { noClobber: true });
   } catch (error) {
-    if (error instanceof BatchTasksError && error.code === "target_exists") {
+    if (error instanceof AgentJobsError && error.code === "target_exists") {
       return false;
     }
     throw error;
@@ -599,7 +599,7 @@ async function recoverAbandonedLock(
 
   const claimInfo = await inspectLockFile(recoveryClaim);
   if (claimInfo === null) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "lock_error",
       `Recovery claim disappeared after creation: ${recoveryClaim}`,
       { path: recoveryClaim },
@@ -637,7 +637,7 @@ async function inspectLockFile(path: string) {
   try {
     const info = await lstat(path);
     if (info.isSymbolicLink() || !info.isFile()) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "lock_error",
         `Filesystem lock must be a regular file: ${path}`,
         { path },
@@ -659,7 +659,7 @@ async function readLockOwner(path: string): Promise<LockOwner | null> {
     throw error;
   }
   if (info.isSymbolicLink() || !info.isFile()) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "lock_error",
       `Filesystem lock owner must be a regular file: ${path}`,
       { path },
@@ -668,7 +668,7 @@ async function readLockOwner(path: string): Promise<LockOwner | null> {
   try {
     return parseLockOwner(await readJson(path));
   } catch (error) {
-    if (error instanceof BatchTasksError && error.code === "invalid_json") return null;
+    if (error instanceof AgentJobsError && error.code === "invalid_json") return null;
     throw error;
   }
 }
@@ -745,7 +745,7 @@ async function lockTimeoutError(
   lockFile: string,
   timeoutMs: number,
   waitedMs: number,
-): Promise<BatchTasksError> {
+): Promise<AgentJobsError> {
   const details: Record<string, unknown> = {
     path: lockFile,
     timeout_ms: timeoutMs,
@@ -767,7 +767,7 @@ async function lockTimeoutError(
   } catch (error) {
     details.recovery_claim_error = errorMessage(error);
   }
-  return new BatchTasksError(
+  return new AgentJobsError(
     "lock_timeout",
     `Timed out after ${waitedMs}ms waiting for filesystem lock: ${lockFile}`,
     details,
@@ -791,7 +791,7 @@ function ioError(
   path: string,
   error: unknown,
   source?: string,
-): BatchTasksError {
+): AgentJobsError {
   const details: Record<string, unknown> = {
     path,
     reason: errorMessage(error),
@@ -800,7 +800,7 @@ function ioError(
   if (isErrnoException(error) && error.errno !== undefined) {
     details.errno = error.errno;
   }
-  return new BatchTasksError(code, `${message}: ${errorMessage(error)}`, details);
+  return new AgentJobsError(code, `${message}: ${errorMessage(error)}`, details);
 }
 
 function isErrnoException(error: unknown): error is NodeJS.ErrnoException {

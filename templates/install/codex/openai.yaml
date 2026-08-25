@@ -1,7 +1,7 @@
 interface:
-  display_name: "Batch Tasks"
+  display_name: "Agent Jobs"
   short_description: "Run resumable schema-validated native-agent batches"
-  default_prompt: "Use $batch-tasks to run the marker-defined batch and report its validated results."
+  default_prompt: "Use $agent-jobs to run the marker-defined batch and report its validated results."
 
 policy:
   allow_implicit_invocation: true

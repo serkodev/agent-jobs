@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { parsePromptMarkers, stripPromptMarkers } from "../src/config.js";
-import { BatchTasksError } from "../src/errors.js";
+import { AgentJobsError } from "../src/errors.js";
 
 describe("prompt marker configuration", () => {
   it("coerces every supported typed marker", () => {
@@ -67,7 +67,7 @@ OUTPUT_DIR: output
       parsePromptMarkers("MODEL: one\nMODEL: two");
       throw new Error("expected marker parsing to fail");
     } catch (error) {
-      expect(error).toBeInstanceOf(BatchTasksError);
+      expect(error).toBeInstanceOf(AgentJobsError);
       expect(error).toMatchObject({
         code: "duplicate_marker",
         details: { marker: "MODEL", line: 2 },

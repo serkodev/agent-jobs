@@ -1,2 +1,2 @@
-[mcp_servers.batch_tasks.env]
-BATCH_TASKS_PROJECT_DIR = {{PROJECT_ROOT}}
+[mcp_servers.agent_jobs.env]
+AGENT_JOBS_PROJECT_DIR = {{PROJECT_ROOT}}

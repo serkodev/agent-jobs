@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { BatchTasksError } from "../src/errors.js";
+import { AgentJobsError } from "../src/errors.js";
 import {
   canonicalizeId,
   loadRecords,
@@ -203,7 +203,7 @@ describe("JSON Pointer", () => {
   it.each(["payload/records", "/missing", "/rows/9", "/rows/not-index"])(
     "rejects an unavailable pointer %s",
     (pointer) => {
-      expect(() => resolveJsonPointer({ rows: [] }, pointer)).toThrowError(BatchTasksError);
+      expect(() => resolveJsonPointer({ rows: [] }, pointer)).toThrowError(AgentJobsError);
     },
   );
 

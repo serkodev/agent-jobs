@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { stringify as stringifyYaml } from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { BatchTasksError } from "../src/errors.js";
+import { AgentJobsError } from "../src/errors.js";
 import {
   loadSpec,
   validationErrors,

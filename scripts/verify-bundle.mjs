@@ -18,7 +18,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 
 const execute = promisify(execFile);
 const root = resolve(import.meta.dirname, '..');
-const bundle = join(root, 'dist', 'batch-tasks.mjs');
+const bundle = join(root, 'dist', 'agent-jobs.mjs');
 const nodeExecutable = process.argv[2] ? resolve(process.argv[2]) : process.execPath;
 const expectedTools = ['get_assignment', 'submit_result', 'report_failure'];
 
@@ -32,7 +32,7 @@ async function cli(cwd, executable, ...args) {
 }
 
 const files = await readdir(join(root, 'dist'));
-assert.deepEqual(files, ['batch-tasks.mjs']);
+assert.deepEqual(files, ['agent-jobs.mjs']);
 const bundleText = await readFile(bundle, 'utf8');
 assert.ok(bundleText.startsWith('#!/usr/bin/env node\n'));
 for (const match of bundleText.matchAll(/^import .* from ["']([^"']+)["'];?$/gm)) {
@@ -40,7 +40,7 @@ for (const match of bundleText.matchAll(/^import .* from ["']([^"']+)["'];?$/gm)
 }
 
 const temporary = await mkdtemp(join(tmpdir(), 'batch-bundle-verify-'));
-const bareBundle = join(temporary, 'batch-tasks.mjs');
+const bareBundle = join(temporary, 'agent-jobs.mjs');
 try {
   await copyFile(bundle, bareBundle);
   await chmod(bareBundle, 0o755);
@@ -48,7 +48,7 @@ try {
     cwd: temporary,
     env: { ...process.env, NODE_PATH: '' },
   });
-  assert.match(help.stdout, /init\s+Initialize batch-tasks/);
+  assert.match(help.stdout, /init\s+Initialize Agent Jobs/);
 
   const inputPath = join(temporary, 'input.json');
   const specPath = join(temporary, 'task.md');
@@ -121,7 +121,7 @@ Return one summary string.
     env: {
       ...process.env,
       NODE_PATH: '',
-      BATCH_TASKS_PROJECT_DIR: temporary,
+      AGENT_JOBS_PROJECT_DIR: temporary,
     },
     stderr: 'pipe',
   });

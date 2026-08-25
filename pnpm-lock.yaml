@@ -8,7 +8,7 @@ importers:
 
   .:
     devDependencies:
-      '@batch-tasks/runtime':
+      '@agent-jobs/runtime':
         specifier: workspace:*
         version: link:packages/runtime
       '@modelcontextprotocol/client':

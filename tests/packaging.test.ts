@@ -17,19 +17,19 @@ describe('package build contract', () => {
     const workspace = await readFile(join(root, 'pnpm-workspace.yaml'), 'utf8');
 
     expect(installer).toMatchObject({
-      name: 'batch-tasks-agent',
+      name: 'agent-jobs',
       version: '0.3.0',
       private: true,
-      bin: { 'batch-tasks': 'dist/batch-tasks.mjs' },
-      files: ['dist/batch-tasks.mjs', 'README.md'],
+      bin: { 'agent-jobs': 'dist/agent-jobs.mjs' },
+      files: ['dist/agent-jobs.mjs', 'README.md'],
       devDependencies: {
-        '@batch-tasks/runtime': 'workspace:*',
+        '@agent-jobs/runtime': 'workspace:*',
         vite: '8.2.1',
       },
     });
     expect(installer.dependencies).toBeUndefined();
     expect(runtime).toMatchObject({
-      name: '@batch-tasks/runtime',
+      name: '@agent-jobs/runtime',
       version: '0.3.0',
       private: true,
       description: expect.stringContaining('MCP server'),
@@ -48,7 +48,7 @@ describe('package build contract', () => {
     const config = await readFile(join(root, 'vite.config.ts'), 'utf8');
 
     expect(scripts.build).toContain('vite build');
-    expect(scripts['batch-tasks']).toBe('node dist/batch-tasks.mjs');
+    expect(scripts['agent-jobs']).toBe('node dist/agent-jobs.mjs');
     expect(scripts.build).not.toContain('sync-skill-bundle');
     expect(scripts.build).not.toContain('tsdown');
     expect(scripts.build).not.toContain('generate:templates');
@@ -56,7 +56,7 @@ describe('package build contract', () => {
     expect(config).toContain("platform: 'node'");
     expect(config).toContain("conditions: ['node']");
     expect(config).toContain("formats: ['es']");
-    expect(config).toContain("fileName: () => 'batch-tasks.mjs'");
+    expect(config).toContain("fileName: () => 'agent-jobs.mjs'");
     expect(config).toContain('codeSplitting: false');
     expect(config).toContain('external: (id) => nodeBuiltins.has(id)');
   });
@@ -67,7 +67,7 @@ describe('package build contract', () => {
 
     expect(bin.startsWith('#!/usr/bin/env node')).toBe(true);
     expect(bin).toContain('void main().then');
-    expect(index).toContain("export * from '@batch-tasks/runtime'");
+    expect(index).toContain("export * from '@agent-jobs/runtime'");
     expect(index).not.toContain('process.argv');
     expect(index).not.toContain('#!/usr/bin/env node');
   });
@@ -84,11 +84,11 @@ describe('package build contract', () => {
       'utf8',
     );
     const claudeWorker = await readFile(
-      join(root, 'templates', 'install', 'claude', 'agents', 'batch_worker.md'),
+      join(root, 'templates', 'install', 'claude', 'agents', 'agent_job_worker.md'),
       'utf8',
     );
     const codexWorker = await readFile(
-      join(root, 'templates', 'install', 'codex', 'agents', 'batch_worker.toml'),
+      join(root, 'templates', 'install', 'codex', 'agents', 'agent_job_worker.toml'),
       'utf8',
     );
     const codexConfig = await readFile(
@@ -101,19 +101,19 @@ describe('package build contract', () => {
     );
 
     expect(installerTemplates).toContain("shared/SKILL.md?raw'");
-    expect(installerTemplates).toContain("batch_worker.md?raw'");
-    expect(installerTemplates).toContain("batch_worker.toml?raw'");
+    expect(installerTemplates).toContain("agent_job_worker.md?raw'");
+    expect(installerTemplates).toContain("agent_job_worker.toml?raw'");
     expect(installerTemplates).toContain("config.toml?raw'");
     expect(installerTemplates).toContain("openai.yaml?raw'");
     expect(installerTemplates).not.toContain('generated/install-markdown');
-    expect(installerTemplates).not.toContain('name = "batch_worker"');
+    expect(installerTemplates).not.toContain('name = "agent_job_worker"');
     expect(installerTemplates).not.toContain('interface:\n  display_name:');
     expect(compilerOptions.types).toContain('vite/client');
-    expect(sharedSkill).toContain('{{BATCH_TASKS_CLI}} prepare');
+    expect(sharedSkill).toContain('{{AGENT_JOBS_CLI}} prepare');
     expect(sharedSkill).toContain('{{WORKER_ORCHESTRATION}}');
-    expect(claudeWorker).toContain('mcp__batch_tasks__get_assignment');
+    expect(claudeWorker).toContain('mcp__agent_jobs__get_assignment');
     expect(codexWorker).toContain('args = [{{SCRIPT_PATH}}, "mcp"]');
     expect(codexConfig).toContain('{{PROJECT_ENV_SECTION}}');
-    expect(openAiMetadata).toContain('display_name: "Batch Tasks"');
+    expect(openAiMetadata).toContain('display_name: "Agent Jobs"');
   });
 });

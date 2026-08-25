@@ -8,7 +8,7 @@ import { Ajv2020, type ErrorObject, type ValidateFunction } from "ajv/dist/2020.
 import formatsPlugin from "ajv-formats";
 import { parseDocument } from "yaml";
 
-import { BatchTasksError } from "./errors.js";
+import { AgentJobsError } from "./errors.js";
 import { readUtf8File, stringifyStrictJson, type FilePath } from "./storage.js";
 
 export type JsonSchema = Record<string, unknown>;
@@ -124,7 +124,7 @@ export async function loadSpec(path: FilePath): Promise<TaskSpec> {
     const info = await stat(source);
     if (!info.isFile()) throw new Error("not a regular file");
   } catch {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "spec_not_found",
       `Task spec does not exist: ${source}`,
       { path: source },
@@ -135,7 +135,7 @@ export async function loadSpec(path: FilePath): Promise<TaskSpec> {
   try {
     text = await readUtf8File(source);
   } catch (error) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "invalid_spec",
       `Could not read task spec: ${errorMessage(error)}`,
     );
@@ -146,7 +146,7 @@ export async function loadSpec(path: FilePath): Promise<TaskSpec> {
     (key) => !Object.prototype.hasOwnProperty.call(metadata, key),
   );
   if (missing.length > 0) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "invalid_spec",
       "Task spec frontmatter is missing required keys",
       { missing },
@@ -155,13 +155,13 @@ export async function loadSpec(path: FilePath): Promise<TaskSpec> {
 
   const name = metadata.name;
   if (typeof name !== "string" || name.trim().length === 0) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "invalid_spec",
       "Task spec name must be a non-empty string",
     );
   }
   if (instructions.trim().length === 0) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "invalid_spec",
       "Task spec Markdown instructions must not be empty",
     );
@@ -170,7 +170,7 @@ export async function loadSpec(path: FilePath): Promise<TaskSpec> {
   const inputSchema = metadata.input_schema;
   const outputSchema = metadata.output_schema;
   if (!isRecord(inputSchema) || !isRecord(outputSchema)) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "invalid_spec",
       "input_schema and output_schema must be objects",
     );
@@ -178,13 +178,13 @@ export async function loadSpec(path: FilePath): Promise<TaskSpec> {
   checkSchema(inputSchema, "input_schema");
   checkSchema(outputSchema, "output_schema");
   if (inputSchema.type !== "object" || outputSchema.type !== "object") {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "invalid_spec",
       "v1 input_schema and output_schema must have type: object",
     );
   }
   if (!isRecord(inputSchema.properties)) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "invalid_spec",
       "input_schema.properties must be an object for field projection",
     );
@@ -193,7 +193,7 @@ export async function loadSpec(path: FilePath): Promise<TaskSpec> {
   let defaults: Record<string, unknown> = {};
   if (metadata.defaults !== undefined && metadata.defaults !== null) {
     if (!isRecord(metadata.defaults)) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "invalid_spec",
         "defaults must be an object when provided",
       );
@@ -214,7 +214,7 @@ export async function loadSpec(path: FilePath): Promise<TaskSpec> {
     ["reasoning_effort", reasoningEffort],
   ] as const) {
     if (value !== null && (typeof value !== "string" || value.trim().length === 0)) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "invalid_spec",
         `${key} must be a non-empty string`,
       );
@@ -232,14 +232,14 @@ export async function loadSpec(path: FilePath): Promise<TaskSpec> {
     !["string", "number", "bigint"].includes(typeof version) ||
     (typeof version === "number" && !Number.isFinite(version))
   ) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "invalid_spec",
       "Task spec version must be a string or number",
     );
   }
   const description = metadata.description ?? null;
   if (description !== null && typeof description !== "string") {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "invalid_spec",
       "Task spec description must be a string",
     );
@@ -272,7 +272,7 @@ export function validationErrors(
       normalizedRoot: normalizedInstance,
     }).compile(transformedSchema);
   } catch (error) {
-    if (error instanceof BatchTasksError) throw error;
+    if (error instanceof AgentJobsError) throw error;
     throw schemaReferenceError(error);
   }
 
@@ -280,7 +280,7 @@ export function validationErrors(
   try {
     valid = validator(normalizedInstance) as boolean;
   } catch (error) {
-    if (error instanceof BatchTasksError) throw error;
+    if (error instanceof AgentJobsError) throw error;
     throw schemaReferenceError(error);
   }
   if (valid) return [];
@@ -300,14 +300,14 @@ function parseFrontmatter(text: string): {
 } {
   const lines = text.split(/\r\n|\n|\r/);
   if (lines.length === 0 || lines[0]?.trim() !== "---") {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "invalid_spec",
       "Runnable task specs must begin with YAML frontmatter",
     );
   }
   const closing = lines.findIndex((line, index) => index > 0 && line.trim() === "---");
   if (closing < 0) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "invalid_spec",
       "Task spec YAML frontmatter is not closed",
     );
@@ -329,13 +329,13 @@ function parseFrontmatter(text: string): {
     const raw: unknown = document.toJS({ mapAsMap: true, maxAliasCount: 100 });
     metadata = normalizeYamlObject(raw);
   } catch (error) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "invalid_spec",
       `Invalid YAML frontmatter: ${errorMessage(error)}`,
     );
   }
   if (!isRecord(metadata)) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "invalid_spec",
       "Task spec frontmatter must be an object",
     );
@@ -350,7 +350,7 @@ function checkSchema(schema: JsonSchema, name: string): void {
   try {
     stringifyStrictJson(schema);
   } catch (error) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "invalid_spec",
       `${name} must contain only JSON-compatible values: ${errorMessage(error)}`,
     );
@@ -362,13 +362,13 @@ function checkSchema(schema: JsonSchema, name: string): void {
   try {
     schemaValid = ajv.validateSchema(metadataSchema) as boolean;
   } catch (error) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "invalid_spec",
       `${name} is not a valid JSON Schema: ${errorMessage(error)}`,
     );
   }
   if (!schemaValid) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "invalid_spec",
       `${name} is not a valid JSON Schema: ${ajv.errorsText(ajv.errors, { separator: "; " })}`,
     );
@@ -377,8 +377,8 @@ function checkSchema(schema: JsonSchema, name: string): void {
   try {
     ajv.compile(transformSchemaForExactNumbers(schema) as JsonSchema);
   } catch (error) {
-    if (error instanceof BatchTasksError) throw error;
-    throw new BatchTasksError(
+    if (error instanceof AgentJobsError) throw error;
+    throw new AgentJobsError(
       "invalid_schema_reference",
       `${name} contains a non-local or unresolved $ref`,
       {
@@ -415,8 +415,8 @@ function toDiagnostic(error: ErrorObject): ValidationDiagnostic {
   };
 }
 
-function schemaReferenceError(error: unknown): BatchTasksError {
-  return new BatchTasksError(
+function schemaReferenceError(error: unknown): AgentJobsError {
+  return new AgentJobsError(
     "invalid_schema_reference",
     "JSON Schema contains an unresolved or cyclic reference",
     { reason: errorMessage(error) },
@@ -443,7 +443,7 @@ function normalizeInstanceForAjv(
   if (typeof value === "number") {
     if (!Number.isFinite(value)) return value;
     if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "inexact_number",
         "Unsafe JavaScript integer cannot be schema-validated exactly; use bigint",
         { value: value.toString() },
@@ -559,7 +559,7 @@ function normalizeSchemaLiteralForMeta(
   }
   if (typeof value === "number") {
     if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "inexact_numeric_schema",
         "Unsafe JavaScript integer in JSON Schema is ambiguous; use bigint",
         { value: value.toString() },
@@ -597,7 +597,7 @@ function transformSchemaForExactNumbers(
 
   for (const [key, value] of Object.entries(schema)) {
     if (EXACT_KEYWORD_NAMES.has(key)) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "invalid_spec",
         `JSON Schema uses reserved internal keyword: ${key}`,
       );
@@ -715,7 +715,7 @@ function encodeExactKeyword(key: string, value: unknown): unknown {
       exactFingerprint(item, new WeakSet<object>(), true),
     );
     if (new Set(fingerprints).size !== fingerprints.length) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "invalid_spec",
         "JSON Schema enum values must be unique",
       );
@@ -739,7 +739,7 @@ function normalizeSchemaLiteral(
   }
   if (typeof value === "number") {
     if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
-      throw new BatchTasksError(
+      throw new AgentJobsError(
         "inexact_numeric_schema",
         "Unsafe JavaScript integer in JSON Schema is ambiguous; use bigint",
         { value: value.toString() },
@@ -859,7 +859,7 @@ function addExactKeywords(ajv: Ajv2020, context: ExactValidationContext): void {
 function schemaRational(value: unknown): Rational {
   const rational = numericRational(value, true);
   if (rational === null) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       "invalid_spec",
       "Numeric JSON Schema keyword must contain a finite number",
     );
@@ -871,7 +871,7 @@ function numericRational(value: unknown, schema = false): Rational | null {
   if (typeof value === "bigint") return { numerator: value, denominator: 1n };
   if (typeof value !== "number" || !Number.isFinite(value)) return null;
   if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       schema ? "inexact_numeric_schema" : "inexact_number",
       schema
         ? "Unsafe JavaScript integer in JSON Schema is ambiguous; use bigint"

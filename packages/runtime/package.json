@@ -1,9 +1,9 @@
 {
-  "name": "@batch-tasks/runtime",
+  "name": "@agent-jobs/runtime",
   "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "Batch task state machine and batch_tasks MCP server",
+  "description": "Durable agent-job state machine and agent_jobs MCP server",
   "exports": {
     ".": {
       "types": "./src/index.ts",

@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { BatchTasksError, type BatchRuntime } from '@batch-tasks/runtime';
+import { AgentJobsError, type AgentJobsRuntime } from '@agent-jobs/runtime';
 
 import { runCli, runProcessCli } from '../src/cli.js';
 
@@ -22,7 +22,7 @@ function captureStream(): {
   };
 }
 
-function fakeRuntime(overrides: Partial<BatchRuntime> = {}): BatchRuntime {
+function fakeRuntime(overrides: Partial<AgentJobsRuntime> = {}): AgentJobsRuntime {
   return {
     prepare: vi.fn().mockResolvedValue({ invocation_id: 'invocation' }),
     next: vi.fn().mockResolvedValue({ assignments: [] }),
@@ -31,7 +31,7 @@ function fakeRuntime(overrides: Partial<BatchRuntime> = {}): BatchRuntime {
     collect: vi.fn().mockResolvedValue({ path: '/tmp/aggregate.json' }),
     doctor: vi.fn().mockResolvedValue({ ok: true, registry_dir: '/tmp/registry' }),
     ...overrides,
-  } as unknown as BatchRuntime;
+  } as unknown as AgentJobsRuntime;
 }
 
 describe('runCli', () => {
@@ -106,7 +106,7 @@ describe('runCli', () => {
       prepare: vi
         .fn()
         .mockRejectedValue(
-          new BatchTasksError('duplicate_id', 'Canonical ID is duplicated'),
+          new AgentJobsError('duplicate_id', 'Canonical ID is duplicated'),
         ),
     });
     const stdout = captureStream();

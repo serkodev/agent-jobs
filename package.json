@@ -1,14 +1,14 @@
 {
-  "name": "batch-tasks-agent",
+  "name": "agent-jobs",
   "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "Bootstrap and run reusable batch tasks with native Codex and Claude subagents",
+  "description": "Run resumable, schema-validated agent jobs with native Codex and Claude workers",
   "bin": {
-    "batch-tasks": "dist/batch-tasks.mjs"
+    "agent-jobs": "dist/agent-jobs.mjs"
   },
   "files": [
-    "dist/batch-tasks.mjs",
+    "dist/agent-jobs.mjs",
     "README.md"
   ],
   "engines": {
@@ -16,16 +16,16 @@
   },
   "packageManager": "pnpm@11.19.0",
   "scripts": {
-    "batch-tasks": "node dist/batch-tasks.mjs",
+    "agent-jobs": "node dist/agent-jobs.mjs",
     "build": "pnpm typecheck && vite build",
     "prepack": "pnpm build",
     "test:bundle": "pnpm build && node scripts/verify-bundle.mjs",
-    "typecheck": "pnpm --filter @batch-tasks/runtime typecheck && tsc --noEmit",
-    "test": "pnpm --filter @batch-tasks/runtime test && vitest run",
+    "typecheck": "pnpm --filter @agent-jobs/runtime typecheck && tsc --noEmit",
+    "test": "pnpm --filter @agent-jobs/runtime test && vitest run",
     "test:watch": "vitest"
   },
   "devDependencies": {
-    "@batch-tasks/runtime": "workspace:*",
+    "@agent-jobs/runtime": "workspace:*",
     "@modelcontextprotocol/client": "^2.0.0",
     "@types/node": "^24.10.0",
     "typescript": "^7.0.2",

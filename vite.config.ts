@@ -23,7 +23,7 @@ export default defineConfig({
     lib: {
       entry: resolve(import.meta.dirname, 'src/bin.ts'),
       formats: ['es'],
-      fileName: () => 'batch-tasks.mjs',
+      fileName: () => 'agent-jobs.mjs',
     },
     rolldownOptions: {
       platform: 'node',

@@ -13,7 +13,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { BatchTasksError } from "../src/errors.js";
+import { AgentJobsError } from "../src/errors.js";
 import {
   atomicMove,
   atomicWriteJson,
@@ -244,7 +244,7 @@ describe("move, unlink, and locking", () => {
     const error = await withLock(path, () => "unexpected", {
       timeoutMs: 50,
     }).catch((caught: unknown) => caught);
-    expect(error).toBeInstanceOf(BatchTasksError);
+    expect(error).toBeInstanceOf(AgentJobsError);
     expect(error).toMatchObject({
       code: "lock_timeout",
       details: {
@@ -300,7 +300,7 @@ describe("move, unlink, and locking", () => {
     expect(waiterEntries).toBe(0);
     expect(errors).toHaveLength(12);
     for (const error of errors) {
-      expect(error).toBeInstanceOf(BatchTasksError);
+      expect(error).toBeInstanceOf(AgentJobsError);
       expect(error).toMatchObject({
         code: "lock_timeout",
         details: {
@@ -331,7 +331,7 @@ describe("move, unlink, and locking", () => {
 
   it("preserves operation errors raised inside a lock", async () => {
     const root = await temporaryRoot();
-    const expected = new BatchTasksError("inner", "inner failure");
+    const expected = new AgentJobsError("inner", "inner failure");
     await expect(
       withLock(join(root, "state.lock"), () => {
         throw expected;

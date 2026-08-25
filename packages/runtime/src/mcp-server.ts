@@ -2,11 +2,11 @@ import { McpServer } from '@modelcontextprotocol/server';
 import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import * as z from 'zod/v4';
 
-import { BatchTasksError } from './errors.js';
-import { BatchRuntime } from './state.js';
+import { AgentJobsError } from './errors.js';
+import { AgentJobsRuntime } from './state.js';
 import { parseStrictJson, stringifyStrictJson } from './storage.js';
 
-export const BATCH_TOOL_NAMES = [
+export const AGENT_JOBS_TOOL_NAMES = [
   'get_assignment',
   'submit_result',
   'report_failure',
@@ -46,7 +46,7 @@ const submitToolJsonSchema = {
 const submitToolInputSchema = {
   '~standard': {
     version: 1 as const,
-    vendor: 'batch-tasks-agent',
+    vendor: 'agent-jobs',
     types: undefined as unknown as {
       input: SubmitToolArguments;
       output: SubmitToolArguments;
@@ -99,10 +99,10 @@ const submitToolInputSchema = {
   },
 };
 
-let runtimeInstance: BatchRuntime | undefined;
+let runtimeInstance: AgentJobsRuntime | undefined;
 
-function defaultRuntime(): BatchRuntime {
-  runtimeInstance ??= new BatchRuntime();
+function defaultRuntime(): AgentJobsRuntime {
+  runtimeInstance ??= new AgentJobsRuntime();
   return runtimeInstance;
 }
 
@@ -111,7 +111,7 @@ export function resetMcpRuntime(): void {
   runtimeInstance = undefined;
 }
 
-function serializeDomainError(error: BatchTasksError): string {
+function serializeDomainError(error: AgentJobsError): string {
   return stringifyStrictJson(error.asDict());
 }
 
@@ -119,7 +119,7 @@ async function invokeRuntime<T>(operation: () => Promise<T>): Promise<T> {
   try {
     return await operation();
   } catch (error) {
-    if (error instanceof BatchTasksError) {
+    if (error instanceof AgentJobsError) {
       throw new Error(serializeDomainError(error));
     }
     throw error;
@@ -128,16 +128,16 @@ async function invokeRuntime<T>(operation: () => Promise<T>): Promise<T> {
 
 export async function getAssignment(
   handle: string,
-  runtime: BatchRuntime = defaultRuntime(),
-): Promise<Awaited<ReturnType<BatchRuntime['getAssignment']>>> {
+  runtime: AgentJobsRuntime = defaultRuntime(),
+): Promise<Awaited<ReturnType<AgentJobsRuntime['getAssignment']>>> {
   return invokeRuntime(() => runtime.getAssignment(handle));
 }
 
 export async function submitResult(
   handle: string,
   result: unknown,
-  runtime: BatchRuntime = defaultRuntime(),
-): Promise<Awaited<ReturnType<BatchRuntime['submitResult']>>> {
+  runtime: AgentJobsRuntime = defaultRuntime(),
+): Promise<Awaited<ReturnType<AgentJobsRuntime['submitResult']>>> {
   return invokeRuntime(() => runtime.submitResult(handle, result));
 }
 
@@ -146,13 +146,13 @@ function parseResultJson(resultJson: string): Record<string, unknown> {
   try {
     result = parseStrictJson(resultJson);
   } catch (error) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       'invalid_result_json',
       `result_json must contain valid strict JSON: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
   if (result === null || typeof result !== 'object' || Array.isArray(result)) {
-    throw new BatchTasksError(
+    throw new AgentJobsError(
       'invalid_result_json',
       'result_json must contain a JSON object',
     );
@@ -162,8 +162,8 @@ function parseResultJson(resultJson: string): Record<string, unknown> {
 
 async function submitToolResult(
   arguments_: SubmitToolArguments,
-  runtime: BatchRuntime,
-): Promise<Awaited<ReturnType<BatchRuntime['submitResult']>>> {
+  runtime: AgentJobsRuntime,
+): Promise<Awaited<ReturnType<AgentJobsRuntime['submitResult']>>> {
   return invokeRuntime(() => {
     const result =
       typeof arguments_.result_json === 'string'
@@ -177,8 +177,8 @@ export async function reportFailure(
   handle: string,
   code: string,
   message: string,
-  runtime: BatchRuntime = defaultRuntime(),
-): Promise<Awaited<ReturnType<BatchRuntime['reportFailure']>>> {
+  runtime: AgentJobsRuntime = defaultRuntime(),
+): Promise<Awaited<ReturnType<AgentJobsRuntime['reportFailure']>>> {
   return invokeRuntime(() => runtime.reportFailure(handle, code, message));
 }
 
@@ -224,11 +224,11 @@ function exactJsonToolResult(value: unknown): {
 }
 
 /** Build one MCP server exposing only the three capability-based worker tools. */
-export function createBatchTasksServer(
-  runtime: BatchRuntime = new BatchRuntime(),
+export function createAgentJobsServer(
+  runtime: AgentJobsRuntime = new AgentJobsRuntime(),
 ): McpServer {
   const server = new McpServer(
-    { name: 'batch_tasks', version: '1.0.0' },
+    { name: 'agent_jobs', version: '1.0.0' },
     {
       instructions:
         'Retrieve exactly one opaque assignment, then submit its result or report a failure. Do not access batch output files directly.',
@@ -276,7 +276,7 @@ export function createBatchTasksServer(
 
 /** Start the local server over stdio without writing application data to stdout. */
 export async function runMcpServer(): Promise<void> {
-  const server = createBatchTasksServer();
+  const server = createAgentJobsServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }

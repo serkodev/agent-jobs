@@ -2,14 +2,14 @@ import { writeSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 
 import {
-  BatchRuntime,
-  BatchTasksError,
+  AgentJobsRuntime,
+  AgentJobsError,
   type CollectFormat,
   type OnError,
   type PrepareOptions,
   runMcpServer,
   stringifyStrictJson,
-} from '@batch-tasks/runtime';
+} from '@agent-jobs/runtime';
 
 import {
   runInstallerCommand,
@@ -35,8 +35,8 @@ interface SignalTarget {
 }
 
 export interface CliDependencies {
-  runtime?: BatchRuntime;
-  runtimeFactory?: () => BatchRuntime;
+  runtime?: AgentJobsRuntime;
+  runtimeFactory?: () => AgentJobsRuntime;
   runMcp?: () => unknown | Promise<unknown>;
   stdout?: Writable;
   stderr?: Writable;
@@ -53,22 +53,22 @@ interface InvocationArguments {
   invocationId: string;
 }
 
-const HELP = `Usage: batch-tasks <command> [options]
+const HELP = `Usage: agent-jobs <command> [options]
 
 Commands:
-  init      Initialize batch-tasks in the current or specified directory
-  uninstall Remove files managed by a previous batch-tasks initialization
+  init      Initialize Agent Jobs in the current or specified directory
+  uninstall Remove files managed by a previous Agent Jobs initialization
   prepare   Validate all input rows and prepare a batch
   next      Issue opaque worker assignments
   status    Inspect batch progress
   validate  Validate committed outputs and write report.json
   collect   Collect valid outputs in input order
   doctor    Check the local installation
-  mcp       Run the batch_tasks stdio MCP server
+  mcp       Run the agent_jobs stdio MCP server
 `;
 
 function invalidArguments(message: string): never {
-  throw new BatchTasksError('invalid_arguments', message);
+  throw new AgentJobsError('invalid_arguments', message);
 }
 
 function requiredString(
@@ -137,7 +137,7 @@ function parseStrict(
     }
     return values;
   } catch (error) {
-    if (error instanceof BatchTasksError) throw error;
+    if (error instanceof AgentJobsError) throw error;
     invalidArguments(error instanceof Error ? error.message : String(error));
   }
 }
@@ -154,7 +154,7 @@ function parseInvocationArguments(args: readonly string[]): InvocationArguments 
 }
 
 async function dispatch(
-  runtime: BatchRuntime,
+  runtime: AgentJobsRuntime,
   command: string,
   args: readonly string[],
 ): Promise<JsonObject> {
@@ -267,7 +267,7 @@ function emit(stream: Writable, payload: JsonObject): void {
   stream.write(`${stringifyStrictJson(payload)}\n`);
 }
 
-function domainErrorPayload(error: BatchTasksError): JsonObject {
+function domainErrorPayload(error: AgentJobsError): JsonObject {
   return { ok: false, error: error.asDict() };
 }
 
@@ -306,13 +306,13 @@ export async function runCli(
 
     const runtime =
       dependencies.runtime ??
-      (dependencies.runtimeFactory ?? (() => new BatchRuntime()))();
+      (dependencies.runtimeFactory ?? (() => new AgentJobsRuntime()))();
     const result = await dispatch(runtime, command, argv.slice(1));
     emit(stdout, { ok: true, ...result });
     return command === 'doctor' && result.ok === false ? 2 : 0;
   } catch (error) {
     if (command === 'mcp') {
-      if (error instanceof BatchTasksError) {
+      if (error instanceof AgentJobsError) {
         stderr.write(`${error.code}: ${error.message}\n`);
         return 2;
       }
@@ -321,7 +321,7 @@ export async function runCli(
       );
       return 1;
     }
-    if (error instanceof BatchTasksError) {
+    if (error instanceof AgentJobsError) {
       emit(stdout, domainErrorPayload(error));
       return 2;
     }
