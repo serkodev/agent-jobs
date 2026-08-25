@@ -1,7 +1,7 @@
 {
   "name": "@agent-jobs/runtime",
   "type": "module",
-  "version": "0.3.0",
+  "version": "0.0.0-alpha.0",
   "private": true,
   "description": "Durable agent-job state machine and agent_jobs MCP server",
   "exports": {
