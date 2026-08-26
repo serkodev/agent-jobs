@@ -26,6 +26,9 @@
     "test": "pnpm --filter @agent-jobs/runtime test && vitest run",
     "test:watch": "vitest"
   },
+  "dependencies": {
+    "@libsql/client": "^0.17.4"
+  },
   "devDependencies": {
     "@agent-jobs/runtime": "workspace:*",
     "@antfu/eslint-config": "^9.3.0",

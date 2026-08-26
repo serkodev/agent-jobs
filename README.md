@@ -7,15 +7,15 @@ Agent Jobs solves the coordination problems that appear when a normal agent prom
 turns into a batch workload: shared context grows, results get mixed together,
 progress is easy to lose, and concurrent workers can overwrite one another. It
 turns the dataset into a schema-validated agent job, gives every input record an
-isolated worker assignment, and stores progress on disk so interrupted runs can
-resume safely.
+isolated worker assignment, and stores progress transactionally in SQLite so
+interrupted runs can resume safely.
 
 Key benefits:
 
 - A fresh agent context for every record
 - JSON Schema validation for both inputs and outputs
 - Bounded concurrency and automatic retries
-- Durable, resumable progress with atomic result writes
+- Durable, resumable progress with transactional result commits
 - Small parent context: workers receive only their assigned record
 - Native project or global setup for Codex and Claude
 
@@ -170,7 +170,7 @@ each worker's task.
 | `REASONING_EFFORT` | No | Reasoning effort used by row workers |
 | `MAX_CONCURRENCY` | No | Maximum workers to run at once |
 | `MAX_RETRIES` | No | Retries after the first failed attempt; default: `1` |
-| `RETRY_INVALID` | No | Set to `true` to archive and rerun an existing invalid result |
+| `RETRY_INVALID` | No | Set to `true` to ignore and rerun a cached result that fails schema or integrity validation |
 | `ON_ERROR` | No | `stop` (default) or `continue_successes` |
 | `COLLECT_FORMAT` | No | `none`, `json`, `jsonl`, or `csv`; default: `json` |
 | `POST_PROCESS_MODEL` | No | Model used for the optional final synthesis |
@@ -213,21 +213,29 @@ Each run stores durable state under the selected `OUTPUT_DIR`:
 
 ```text
 proposal-results/
-  runs/<safe-record-id>.json  # Valid task outputs
-  errors/<safe-record-id>.json # Structured worker failures
-  history/invalid/            # Invalid results archived for retry
-  report.json                 # Final validation report
-  collected.json              # Optional combined output
-  .batch/jobs/<job-id>.json   # Queue and resume state
+  .batch/agent-jobs.sqlite  # Authoritative jobs, rows, leases, and results
+  report.json              # Exported final validation report
+  collected.json           # Optional combined output
 ```
 
-Completed records are reused when the same output directory is resumed. Do not
-edit `runs/` directly or run two parent agents against the same `OUTPUT_DIR` at the
-same time. Each `prepare` creates a new job ID that also acts as the execution
-session token. When an interrupted output directory is prepared again, the prior
-session is superseded, its active handles are revoked, and uncommitted records are
-issued again under the new job ID. A result committed before interruption remains
-the authoritative checkpoint and is not repeated.
+Each database row keeps the canonical record ID together with its input hash, and
+each result keeps that input hash plus the task execution hash. A completed result
+is reused only when all three match, so changing a row without changing its ID does
+not reuse stale output.
+
+SQLite transactions serialize leasing, retries, result insertion, and status
+updates. `submit_result` inserts the result and marks its row complete in one
+transaction; there is no intermediate result file for the runtime to reconcile.
+`validate` and `collect` read a consistent database snapshot and explicitly report
+every missing, failed, invalid, and valid row. The JSON report and collected file
+are exports, not queue state.
+
+Each `prepare` creates a new job ID that also acts as the execution session token.
+When an interrupted output directory is prepared again, the prior session is
+superseded, its active handles are revoked, and uncommitted records are issued
+again under the new job ID. A result committed before interruption remains the
+authoritative checkpoint and is not repeated. If two parents prepare the same
+`OUTPUT_DIR`, the later transaction supersedes the earlier session.
 
 ## Contributing
 

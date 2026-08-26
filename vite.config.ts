@@ -9,6 +9,7 @@ const nodeBuiltins = new Set([
   ...builtinModules,
   ...builtinModules.map(name => `node:${name}`),
 ]);
+const runtimeDependencies = new Set(['@libsql/client/sqlite3']);
 
 export default defineConfig({
   define: {
@@ -32,7 +33,7 @@ export default defineConfig({
     },
     rolldownOptions: {
       platform: 'node',
-      external: id => nodeBuiltins.has(id),
+      external: id => nodeBuiltins.has(id) || runtimeDependencies.has(id),
       output: {
         codeSplitting: false,
       },

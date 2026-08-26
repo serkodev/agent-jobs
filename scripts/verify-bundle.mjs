@@ -4,10 +4,12 @@ import { execFile } from 'node:child_process';
 import {
   chmod,
   copyFile,
+  mkdir,
   mkdtemp,
   readdir,
   readFile,
   rm,
+  symlink,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -23,6 +25,7 @@ const root = resolve(import.meta.dirname, '..');
 const bundle = join(root, 'dist', 'agent-jobs.mjs');
 const nodeExecutable = process.argv[2] ? resolve(process.argv[2]) : process.execPath;
 const expectedTools = ['get_assignment', 'submit_result', 'report_failure'];
+const runtimeDependencies = new Set(['@libsql/client/sqlite3']);
 
 async function cli(cwd, executable, ...args) {
   const result = await execute(nodeExecutable, [executable, ...args], {
@@ -38,7 +41,10 @@ assert.deepEqual(files, ['agent-jobs.mjs']);
 const bundleText = await readFile(bundle, 'utf8');
 assert.ok(bundleText.startsWith('#!/usr/bin/env node\n'));
 for (const match of bundleText.matchAll(/^import .* from ["']([^"']+)["'];?$/gm)) {
-  assert.ok(match[1].startsWith('node:'), `unexpected external import: ${match[1]}`);
+  assert.ok(
+    match[1].startsWith('node:') || runtimeDependencies.has(match[1]),
+    `unexpected external import: ${match[1]}`,
+  );
 }
 
 const temporary = await mkdtemp(join(tmpdir(), 'batch-bundle-verify-'));
@@ -46,6 +52,13 @@ const bareBundle = join(temporary, 'agent-jobs.mjs');
 try {
   await copyFile(bundle, bareBundle);
   await chmod(bareBundle, 0o755);
+  const dependencyScope = join(temporary, 'node_modules', '@libsql');
+  await mkdir(dependencyScope, { recursive: true });
+  await symlink(
+    join(root, 'node_modules', '@libsql', 'client'),
+    join(dependencyScope, 'client'),
+    process.platform === 'win32' ? 'junction' : 'dir',
+  );
   const help = await execute(nodeExecutable, [bareBundle, '--help'], {
     cwd: temporary,
     env: { ...process.env, NODE_PATH: '' },
@@ -103,18 +116,28 @@ Return one summary string.
     outputDir,
   );
   assert.equal(prepared.ok, true);
-  const leases = await cli(
-    temporary,
-    bareBundle,
-    'next',
-    '--output-dir',
-    outputDir,
-    '--job-id',
-    prepared.job_id,
-    '--count',
-    '3',
+  const leaseWaves = await Promise.all(
+    Array.from({ length: 6 }, () =>
+      cli(
+        temporary,
+        bareBundle,
+        'next',
+        '--output-dir',
+        outputDir,
+        '--job-id',
+        prepared.job_id,
+        '--count',
+        '1',
+      )),
   );
+  const leases = {
+    assignments: leaseWaves.flatMap(wave => wave.assignments),
+  };
   assert.equal(leases.assignments.length, 3);
+  assert.equal(
+    new Set(leases.assignments.map(lease => lease.id)).size,
+    leases.assignments.length,
+  );
 
   const transport = new StdioClientTransport({
     command: nodeExecutable,

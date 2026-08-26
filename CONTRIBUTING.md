@@ -88,10 +88,17 @@ tools:
 
 `prepare` validates the input, task spec, IDs, and schemas before workers start.
 Each assignment uses an opaque capability handle, and `submit_result` validates the
-output before publishing it atomically. Every retry uses a fresh worker context.
-The job ID also identifies the single execution session for an output directory.
-A later `prepare` atomically supersedes the previous session, reconciles committed
-outputs, and revokes any remaining assignment handles before new work is issued.
+output before committing the result and queue transition in one SQLite
+transaction. Drizzle owns the typed schema and queries; local libSQL provides the
+Node.js 20-compatible SQLite driver. Every retry uses a fresh worker context.
+
+The database stores each ID with its exact input hash, and results with both the
+input hash and task execution hash. Cache reuse requires all of them to match. The
+job ID identifies the single execution session for an output directory. A later
+`prepare` transactionally supersedes the previous session and revokes any remaining
+assignment handles before new work is issued. `validate` and `collect` use one
+consistent database snapshot, while `report.json` and `collected.*` are exports
+rather than authoritative state.
 
 The isolation model is an application boundary, not an operating-system security
 boundary. Native subagents still share the host and underlying filesystem. Agent

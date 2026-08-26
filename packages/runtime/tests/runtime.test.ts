@@ -1,3 +1,4 @@
+import type { InValue } from '@libsql/client';
 import type { PrepareOptions } from '../src/state.js';
 import {
   mkdir,
@@ -11,17 +12,16 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-
 import { join } from 'node:path';
+
+import { createClient } from '@libsql/client/sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { stringify as stringifyYaml } from 'yaml';
 import { AgentJobsError } from '../src/errors.js';
-import { safeIdFilename } from '../src/input.js';
 import { isPreciseNumber } from '../src/numbers.js';
 import { AgentJobsRuntime } from '../src/state.js';
 import {
-  atomicWriteJson,
   parseStrictJson,
   stringifyStrictJson,
 } from '../src/storage.js';
@@ -33,6 +33,10 @@ interface Prepared {
   superseded_job_id?: string;
   reclaimed_assignments?: number;
   output_dir: string;
+  database: string;
+  source_hash: string;
+  task_hash: string;
+  execution_hash: string;
   counts: Record<string, number>;
   worker: { model: string | null; reasoning_effort: string | null };
 }
@@ -165,6 +169,20 @@ async function readStrict(path: string): Promise<unknown> {
   return parseStrictJson(await readFile(path, 'utf8'));
 }
 
+async function sqliteRows(
+  database: string,
+  sql: string,
+  args: InValue[] = [],
+): Promise<Array<Record<string, unknown>>> {
+  const client = createClient({ url: `file:${database}` });
+  try {
+    const result = await client.execute({ sql, args });
+    return result.rows.map(row => ({ ...row }));
+  } finally {
+    client.close();
+  }
+}
+
 describe('agentJobsRuntime', () => {
   it('preflights every row before creating state or leasing a worker', async () => {
     const context = await fixture({
@@ -186,7 +204,7 @@ describe('agentJobsRuntime', () => {
     });
   });
 
-  it('rejects duplicate canonical IDs and case-insensitive filename collisions', async () => {
+  it('rejects duplicate canonical IDs without imposing filename rules', async () => {
     const duplicate = await fixture({
       rows: [
         { id: 1, title: 'Integer' },
@@ -203,12 +221,9 @@ describe('agentJobsRuntime', () => {
         { id: 'alpha', title: 'Two' },
       ],
     });
-    const error = await prepare(collision).catch((caught: unknown) => caught);
-    expect(error).toBeInstanceOf(AgentJobsError);
-    expect(error).toMatchObject({ code: 'input_validation_failed' });
-    expect(stringifyStrictJson((error as AgentJobsError).details)).toContain(
-      'id_filename_collision',
-    );
+    await expect(prepare(collision)).resolves.toMatchObject({
+      counts: { pending: 2 },
+    });
   });
 
   it('rejects lexical float IDs without collapsing them into integer/string IDs', async () => {
@@ -343,19 +358,19 @@ describe('agentJobsRuntime', () => {
 
     const prepared = await prepare(context, { outputDir: lexicalOutput });
     expect(prepared.output_dir).toBe(expectedOutput);
-    const pointer = (await readStrict(
-      join(expectedOutput, '.batch', 'current.json'),
-    )) as { job_id: string; state_path: string };
-    expect(pointer.job_id).toBe(prepared.job_id);
-    expect(pointer.state_path.startsWith(`${expectedOutput}/.batch/jobs/`)).toBe(
-      true,
+    expect(prepared.database).toBe(
+      join(expectedOutput, '.batch', 'agent-jobs.sqlite'),
     );
-    const state = (await readStrict(pointer.state_path)) as {
-      job_id: string;
-      output_dir: string;
-    };
-    expect(state.job_id).toBe(prepared.job_id);
-    expect(state.output_dir).toBe(expectedOutput);
+    await expect(
+      sqliteRows(
+        prepared.database,
+        'SELECT job_id, output_dir FROM jobs WHERE job_id = ?',
+        [prepared.job_id],
+      ),
+    ).resolves.toEqual([{
+      job_id: prepared.job_id,
+      output_dir: expectedOutput,
+    }]);
 
     const issued = await context.runtime.next(
       lexicalOutput,
@@ -366,9 +381,12 @@ describe('agentJobsRuntime', () => {
     await expect(
       context.runtime.status(lexicalOutput, prepared.job_id),
     ).resolves.toMatchObject({ counts: { completed: 1 } });
-    expect(await readStrict(join(expectedOutput, 'runs', 'one.json'))).toEqual(
-      result('one'),
+    const [stored] = await sqliteRows(
+      prepared.database,
+      'SELECT output_json FROM results WHERE record_id = ?',
+      ['one'],
     );
+    expect(parseStrictJson(String(stored!.output_json))).toEqual(result('one'));
   });
 
   it('does not reveal the canonical ID unless the input schema declares its key', async () => {
@@ -462,7 +480,30 @@ describe('agentJobsRuntime', () => {
     ).resolves.toHaveLength(1);
   });
 
-  it('validates results and uses no-clobber atomic publication', async () => {
+  it('serializes concurrent lease claims without duplicate assignments', async () => {
+    const context = await fixture({
+      rows: Array.from({ length: 8 }, (_, index) => ({
+        id: `row-${index}`,
+        title: `${index}`,
+      })),
+    });
+    const prepared = await prepare(context);
+    const waves = await Promise.all(
+      Array.from({ length: 12 }, () =>
+        nextLeases(context, prepared.job_id, 1)),
+    );
+    const leases = waves.flat();
+    expect(leases).toHaveLength(8);
+    expect(new Set(leases.map(lease => lease.id)).size).toBe(8);
+    expect(new Set(leases.map(lease => lease.handle)).size).toBe(8);
+    await expect(
+      context.runtime.status(context.outputDir, prepared.job_id),
+    ).resolves.toMatchObject({
+      counts: { pending: 0, leased: 8, active: 8 },
+    });
+  });
+
+  it('validates results before committing exactly one database result', async () => {
     const context = await fixture();
     const prepared = await prepare(context);
     const [lease] = await nextLeases(context, prepared.job_id);
@@ -471,29 +512,45 @@ describe('agentJobsRuntime', () => {
     await expect(
       context.runtime.submitResult(lease!.handle, { summary: 'missing vote' }),
     ).rejects.toMatchObject({ code: 'output_validation_failed' });
-    const runPath = join(context.outputDir, 'runs', 'one.json');
-    await expect(readFile(runPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(
+      sqliteRows(prepared.database, 'SELECT * FROM results'),
+    ).resolves.toEqual([]);
 
-    await context.runtime.submitResult(lease!.handle, result('one', true));
-    expect(await readStrict(runPath)).toEqual(result('one', true));
-    expect((await readdir(join(context.outputDir, 'runs'))).sort()).toEqual([
-      'one.json',
-    ]);
+    const submitted = await context.runtime.submitResult(
+      lease!.handle,
+      result('one', true),
+    );
+    expect(submitted).toMatchObject({
+      id: 'one',
+      result_id: expect.any(Number),
+      database: prepared.database,
+      status: 'completed',
+    });
+    const [stored] = await sqliteRows(
+      prepared.database,
+      `SELECT r.output_json, jr.status, jr.result_id
+       FROM job_records jr JOIN results r ON r.result_id = jr.result_id
+       WHERE jr.job_id = ? AND jr.record_id = ?`,
+      [prepared.job_id, 'one'],
+    );
+    expect(parseStrictJson(String(stored!.output_json))).toEqual(
+      result('one', true),
+    );
+    expect(stored).toMatchObject({
+      status: 'completed',
+      result_id: submitted.result_id,
+    });
     await expect(
       context.runtime.submitResult(lease!.handle, result('replacement')),
     ).rejects.toMatchObject({ code: 'invalid_handle' });
   });
 
-  it('reconciles a result committed before an interrupted state update', async () => {
+  it('commits the result row and queue transition in one transaction', async () => {
     const context = await fixture();
     const prepared = await prepare(context);
     const [lease] = await nextLeases(context, prepared.job_id);
     await context.runtime.getAssignment(lease!.handle);
-    await atomicWriteJson(
-      join(context.outputDir, 'runs', 'one.json'),
-      result('winner'),
-      { noClobber: true },
-    );
+    await context.runtime.submitResult(lease!.handle, result('winner'));
 
     const status = await context.runtime.status(
       context.outputDir,
@@ -503,48 +560,52 @@ describe('agentJobsRuntime', () => {
     await expect(
       readFile(join(context.root, 'registry', `${lease!.handle}.json`)),
     ).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(
+      sqliteRows(
+        prepared.database,
+        `SELECT COUNT(*) AS count
+         FROM job_records jr JOIN results r ON r.result_id = jr.result_id
+         WHERE jr.job_id = ? AND jr.status = 'completed'`,
+        [prepared.job_id],
+      ),
+    ).resolves.toEqual([{ count: 1 }]);
   });
 
-  it('lets a valid commit win when failure is reported before submit updates state', async () => {
+  it('serializes competing result and failure commits without split state', async () => {
     const context = await fixture();
     const prepared = await prepare(context, { maxRetries: 0 });
     const [lease] = await nextLeases(context, prepared.job_id);
     await context.runtime.getAssignment(lease!.handle);
-    await atomicWriteJson(
-      join(context.outputDir, 'runs', 'one.json'),
-      result('committed'),
-      { noClobber: true },
-    );
-    // A stale error can be left by an older agent job using the same output.
-    await atomicWriteJson(join(context.outputDir, 'errors', 'one.json'), {
-      code: 'stale',
-    });
-
-    await expect(
+    const outcomes = await Promise.allSettled([
+      context.runtime.submitResult(lease!.handle, result('committed')),
       context.runtime.reportFailure(
         lease!.handle,
         'worker_exit',
-        'submit response was interrupted',
+        'worker exited while submitting',
       ),
-    ).resolves.toMatchObject({
-      status: 'completed',
-      terminal: true,
-      reconciled: true,
-    });
-    await expect(
-      context.runtime.status(context.outputDir, prepared.job_id),
-    ).resolves.toMatchObject({
-      counts: { completed: 1, failed: 0, active: 0 },
-    });
-    await expect(
-      readFile(join(context.outputDir, 'errors', 'one.json')),
-    ).rejects.toMatchObject({ code: 'ENOENT' });
-    await expect(
-      readFile(join(context.root, 'registry', `${lease!.handle}.json`)),
-    ).rejects.toMatchObject({ code: 'ENOENT' });
+    ]);
+    expect(outcomes.filter(outcome => outcome.status === 'fulfilled')).toHaveLength(
+      1,
+    );
+    const status = await context.runtime.status(context.outputDir, prepared.job_id);
+    const counts = status.counts as Record<string, number>;
+    expect(counts.active).toBe(0);
+    expect(counts.completed + counts.failed).toBe(1);
+    const [row] = await sqliteRows(
+      prepared.database,
+      `SELECT status, result_id, last_error_json
+       FROM job_records WHERE job_id = ? AND record_id = ?`,
+      [prepared.job_id, 'one'],
+    );
+    expect(row!.status).toMatch(/^(completed|failed)$/u);
+    expect(
+      row!.status === 'completed'
+        ? row!.result_id !== null && row!.last_error_json === null
+        : row!.result_id === null && row!.last_error_json !== null,
+    ).toBe(true);
   });
 
-  it('converges a terminal failure to completed when a valid run arrives late', async () => {
+  it('reports a terminal database failure as incomplete validation', async () => {
     const context = await fixture();
     const prepared = await prepare(context, { maxRetries: 0 });
     const [lease] = await nextLeases(context, prepared.job_id);
@@ -552,32 +613,27 @@ describe('agentJobsRuntime', () => {
     await expect(
       context.runtime.reportFailure(lease!.handle, 'worker_exit', 'timed out'),
     ).resolves.toMatchObject({ status: 'failed', terminal: true });
-    await atomicWriteJson(
-      join(context.outputDir, 'runs', 'one.json'),
-      result('late'),
-      { noClobber: true },
-    );
 
     await expect(
       context.runtime.validate(context.outputDir, prepared.job_id),
     ).resolves.toMatchObject({
-      valid: true,
-      counts: { valid: 1, failed: 0, missing: 0 },
+      valid: false,
+      counts: { valid: 0, failed: 1, missing: 0 },
     });
     const status = await context.runtime.status(
       context.outputDir,
       prepared.job_id,
     );
-    expect(status).toMatchObject({ counts: { completed: 1, failed: 0 } });
-    expect(status.rows).toEqual([
-      { id: 'one', status: 'completed', attempts: 1 },
-    ]);
-    await expect(
-      readFile(join(context.outputDir, 'errors', 'one.json')),
-    ).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(status).toMatchObject({ counts: { completed: 0, failed: 1 } });
+    expect(status.rows).toEqual([expect.objectContaining({
+      id: 'one',
+      status: 'failed',
+      attempts: 1,
+      last_error: expect.objectContaining({ code: 'worker_exit' }),
+    })]);
   });
 
-  it('issues one fresh retry and then writes a structured terminal error', async () => {
+  it('issues one fresh retry and persists a structured terminal error', async () => {
     const context = await fixture();
     const prepared = await prepare(context, { maxRetries: 1 });
     const [first] = await nextLeases(context, prepared.job_id);
@@ -592,54 +648,93 @@ describe('agentJobsRuntime', () => {
     await expect(
       context.runtime.reportFailure(second!.handle, 'worker_error', 'second'),
     ).resolves.toMatchObject({ terminal: true, status: 'failed', attempts: 2 });
-    expect(await readStrict(join(context.outputDir, 'errors', 'one.json'))).toMatchObject(
-      { id: 'one', code: 'worker_error', message: 'second', attempts: 2 },
-    );
+    const status = await context.runtime.status(context.outputDir, prepared.job_id);
+    expect(status.rows).toEqual([expect.objectContaining({
+      id: 'one',
+      status: 'failed',
+      attempts: 2,
+      last_error: expect.objectContaining({
+        id: 'one',
+        code: 'worker_error',
+        message: 'second',
+        attempts: 2,
+      }),
+    })]);
   });
 
-  it('skips existing output by existence and optionally archives invalid cache', async () => {
-    const skipped = await fixture();
-    await mkdir(join(skipped.outputDir, 'runs'), { recursive: true });
-    await writeFile(
-      join(skipped.outputDir, 'runs', 'one.json'),
-      '{"from":"old spec"}\n',
-      'utf8',
-    );
-    const first = await prepare(skipped);
-    expect(first.counts).toMatchObject({ skipped_invalid: 1, pending: 0 });
-    await expect(
-      nextLeases(skipped, first.job_id, 10),
-    ).resolves.toEqual([]);
-    const validation = await skipped.runtime.validate(
-      skipped.outputDir,
-      first.job_id,
-    );
-    expect(validation).toMatchObject({ valid: false });
+  it('reuses cache only when ID, input hash, and execution hash all match', async () => {
+    const context = await fixture();
+    const first = await prepare(context);
+    const [lease] = await nextLeases(context, first.job_id);
+    await complete(context, lease!, result('cached'));
 
-    const retried = await fixture();
-    await mkdir(join(retried.outputDir, 'runs'), { recursive: true });
+    const identical = await prepare(context);
+    expect(identical.counts).toMatchObject({ skipped_valid: 1, pending: 0 });
+    await expect(nextLeases(context, identical.job_id, 10)).resolves.toEqual([]);
+
     await writeFile(
-      join(retried.outputDir, 'runs', 'one.json'),
-      '{"invalid":true}\n',
+      context.inputPath,
+      `${stringifyStrictJson([{ id: 'one', title: 'Changed' }])}\n`,
       'utf8',
     );
-    const second = await prepare(retried, { retryInvalid: true });
-    expect(second.counts).toMatchObject({ pending: 1, skipped: 0 });
-    const archiveGroups = await readdir(
-      join(retried.outputDir, 'history', 'invalid'),
+    const changedInput = await prepare(context);
+    expect(changedInput.counts).toMatchObject({ skipped_valid: 0, pending: 1 });
+    expect(changedInput.source_hash).not.toBe(first.source_hash);
+
+    await writeFile(
+      context.inputPath,
+      `${stringifyStrictJson([{ id: 'one', title: 'One' }])}\n`,
+      'utf8',
     );
-    expect(archiveGroups).toHaveLength(1);
-    expect(
-      await readStrict(
-        join(
-          retried.outputDir,
-          'history',
-          'invalid',
-          archiveGroups[0]!,
-          'one.json',
-        ),
+    await writeFile(
+      context.specPath,
+      (await readFile(context.specPath, 'utf8')).replace(
+        'Process exactly one row independently.',
+        'Process exactly one row independently and carefully.',
       ),
-    ).toEqual({ invalid: true });
+      'utf8',
+    );
+    const changedTask = await prepare(context);
+    expect(changedTask.counts).toMatchObject({ skipped_valid: 0, pending: 1 });
+    expect(changedTask.task_hash).not.toBe(first.task_hash);
+    expect(changedTask.execution_hash).not.toBe(first.execution_hash);
+  });
+
+  it('detects stored input and result identity tampering', async () => {
+    const inputContext = await fixture();
+    const inputPrepared = await prepare(inputContext);
+    const [inputLease] = await nextLeases(inputContext, inputPrepared.job_id);
+    await sqliteRows(
+      inputPrepared.database,
+      'UPDATE job_records SET input_json = ? WHERE job_id = ? AND record_id = ?',
+      ['{"id":"one","title":"Tampered"}', inputPrepared.job_id, 'one'],
+    );
+    await expect(
+      inputContext.runtime.getAssignment(inputLease!.handle),
+    ).rejects.toMatchObject({ code: 'invalid_job' });
+    await expect(
+      inputContext.runtime.status(inputContext.outputDir, inputPrepared.job_id),
+    ).resolves.toMatchObject({ counts: { leased: 1, running: 0 } });
+
+    const resultContext = await fixture();
+    const resultPrepared = await prepare(resultContext);
+    const [resultLease] = await nextLeases(resultContext, resultPrepared.job_id);
+    await complete(resultContext, resultLease!);
+    await sqliteRows(
+      resultPrepared.database,
+      'UPDATE results SET input_hash = ? WHERE record_id = ?',
+      ['0'.repeat(64), 'one'],
+    );
+    await expect(
+      resultContext.runtime.validate(
+        resultContext.outputDir,
+        resultPrepared.job_id,
+      ),
+    ).resolves.toMatchObject({
+      valid: false,
+      counts: { valid: 0, invalid: 1 },
+      errors: [expect.objectContaining({ code: 'invalid_output' })],
+    });
   });
 
   it('supersedes interrupted assignments and reissues them in the new session', async () => {
@@ -697,16 +792,11 @@ describe('agentJobsRuntime', () => {
     ]);
   });
 
-  it('preserves a committed result when a new session fences its stale handle', async () => {
+  it('reuses an atomically committed result in a new session', async () => {
     const context = await fixture();
     const first = await prepare(context);
     const [lease] = await nextLeases(context, first.job_id);
-    await context.runtime.getAssignment(lease!.handle);
-    await atomicWriteJson(
-      join(context.outputDir, 'runs', 'one.json'),
-      result('committed-before-restart'),
-      { noClobber: true },
-    );
+    await complete(context, lease!, result('committed-before-restart'));
 
     const resumed = await prepare(context);
     expect(resumed).toMatchObject({
@@ -720,12 +810,17 @@ describe('agentJobsRuntime', () => {
     await expect(
       context.runtime.submitResult(lease!.handle, result('late')),
     ).rejects.toMatchObject({ code: 'invalid_handle' });
-    expect(await readStrict(join(context.outputDir, 'runs', 'one.json'))).toEqual(
+    const [stored] = await sqliteRows(
+      resumed.database,
+      'SELECT output_json FROM results WHERE record_id = ? ORDER BY result_id DESC',
+      ['one'],
+    );
+    expect(parseStrictJson(String(stored!.output_json))).toEqual(
       result('committed-before-restart'),
     );
   });
 
-  it('collects in input order and encodes unsafe filenames deterministically', async () => {
+  it('collects in input order and stores unsafe IDs without filenames', async () => {
     const ids = ['first', 'unsafe/id', 'last'];
     const context = await fixture({
       rows: ids.map(id => ({ id, title: id })),
@@ -744,15 +839,22 @@ describe('agentJobsRuntime', () => {
       id: string;
     }>;
     expect(records.map(record => record.id)).toEqual(ids);
-    expect(
-      await readStrict(
-        join(
-          context.outputDir,
-          'runs',
-          `${safeIdFilename('unsafe/id')}.json`,
-        ),
-      ),
-    ).toMatchObject({ summary: 'summary-unsafe/id' });
+    const [stored] = await sqliteRows(
+      prepared.database,
+      `SELECT record_id, input_hash, output_json
+       FROM results WHERE record_id = ?`,
+      ['unsafe/id'],
+    );
+    expect(stored).toMatchObject({
+      record_id: 'unsafe/id',
+      input_hash: expect.stringMatching(/^[0-9a-f]{64}$/u),
+    });
+    expect(parseStrictJson(String(stored!.output_json))).toMatchObject({
+      summary: 'summary-unsafe/id',
+    });
+    await expect(readdir(join(context.outputDir, 'runs'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
   });
 
   it('writes deterministic JSONL, CSV, and none collections', async () => {
@@ -885,7 +987,7 @@ describe('agentJobsRuntime', () => {
     await mkdir(context.outputDir);
     const outside = join(context.root, 'outside');
     await mkdir(outside);
-    await symlink(outside, join(context.outputDir, 'runs'), 'dir');
+    await symlink(outside, join(context.outputDir, '.batch'), 'dir');
     await expect(prepare(context)).rejects.toMatchObject({
       code: 'unsafe_output_path',
       details: { reason: 'symlink' },

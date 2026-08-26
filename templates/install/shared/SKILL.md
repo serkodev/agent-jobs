@@ -93,7 +93,8 @@ the resolved format is `none`, run:
 
 If marker-free prose requests synthesis, start one fresh `agent_job_postprocessor` only
 after validation and collection. Give it only the collection path, the prose, and the
-validation/partial-success statement. Never give it raw run files.
+validation/partial-success statement. Never give it the job database or raw row
+results.
 
 Finish with `status` and report counts, validation, collection path,
 post-processing result, and `report.json` without copying all row outputs into the
@@ -101,9 +102,9 @@ main response.
 
 ## Invariants
 
-- Only `submit_result` may create `runs/*.json`; never repair or replace them.
+- Only `submit_result` may commit row results to the job database.
 - Worker final messages are acknowledgements, never row results.
-- Never bypass unavailable MCP tools with direct filesystem writes.
-- Existing run paths are intentionally existence-only resume checkpoints.
+- Never bypass unavailable MCP tools with direct database or filesystem writes.
+- Cache reuse requires the record ID, input hash, and execution hash to match.
 - Run prepare exactly once per parent execution; its job ID fences older workers.
 - Do not run two parent orchestrators against the same output directory.

@@ -1,43 +1,33 @@
-/** Persistent batch queue and capability-based worker protocol. */
+/** SQLite-backed batch queue and capability-based worker protocol. */
 
+import type { Client } from '@libsql/client';
+import type { AgentJobsDatabase } from './database.js';
 import type { TaskSpec, ValidationDiagnostic } from './spec.js';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { lstat, mkdir, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import {
-  basename,
-  dirname,
-  isAbsolute,
-  join,
-  resolve,
-  sep,
-} from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import process from 'node:process';
-
 import { fileURLToPath } from 'node:url';
-import { AgentJobsError } from './errors.js';
-import {
-  canonicalizeId,
-  loadRecords,
-  safeIdFilename,
-} from './input.js';
-import { isPreciseNumber } from './numbers.js';
-import {
-  loadSpec,
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 
-  validationErrors,
-} from './spec.js';
+import { currentJob, jobRecords, jobs, results } from './database-schema.js';
+import { openAgentJobsDatabase, writeTransaction } from './database.js';
+import { AgentJobsError } from './errors.js';
+import { canonicalizeId, loadRecords } from './input.js';
+import { isPreciseNumber } from './numbers.js';
+import { loadSpec, validationErrors } from './spec.js';
 import {
-  atomicMove,
   atomicWriteJson,
   atomicWriteText,
+  parseStrictJson,
   readJson,
   safeUnlink,
   stringifyStrictJson,
-  withLock,
 } from './storage.js';
 
-export const STATE_VERSION = 1;
+export const STATE_VERSION = 2;
+const DATABASE_FILENAME = 'agent-jobs.sqlite';
 const HANDLE_PREFIX = 'aj_';
 const HANDLE_PATTERN = /^aj_[\w-]{32,}$/;
 const JOB_ID_PATTERN = /^[0-9a-f]{32}$/;
@@ -54,11 +44,11 @@ const COLLECT_FORMATS = new Set<CollectFormat>([
   'jsonl',
   'csv',
 ]);
+const INSERT_CHUNK_SIZE = 40;
 
 export type PathInput = string | URL;
 export type CollectFormat = 'none' | 'json' | 'jsonl' | 'csv';
 export type OnError = 'stop' | 'continue_successes';
-type SessionStatus = 'active' | 'superseded';
 export type RecordStatus
   = | 'pending'
     | 'leased'
@@ -70,6 +60,9 @@ export type RecordStatus
 
 type JsonObject = Record<string, unknown>;
 type JsonSchema = Record<string, unknown>;
+type JobRow = typeof jobs.$inferSelect;
+type JobRecordRow = typeof jobRecords.$inferSelect;
+type ResultRow = typeof results.$inferSelect;
 
 export interface AgentJobsRuntimeOptions {
   registryDir?: PathInput;
@@ -113,20 +106,11 @@ interface FailureRecord extends JsonObject {
   failed_at: string;
 }
 
-interface AgentJobItemRecord extends JsonObject {
+interface PreparedRecord {
   index: number;
   id: string;
-  safe_id: string;
   input: JsonObject;
-  status: RecordStatus;
-  attempts: number;
-  handle: string | null;
-  last_error: FailureRecord | null;
-  leased_at?: string;
-  started_at?: string;
-  completed_at?: string;
-  archived_invalid_path?: string;
-  cache_validation_errors?: ValidationDiagnostic[];
+  inputHash: string;
 }
 
 interface SerializedSpec extends JsonObject {
@@ -136,32 +120,18 @@ interface SerializedSpec extends JsonObject {
   instructions: string;
   input_schema: JsonSchema;
   output_schema: JsonSchema;
-  /** Declaration order survives canonical state JSON key sorting for CSV. */
   output_field_order: string[];
 }
 
-interface AgentJobState extends JsonObject {
-  state_version: number;
-  job_id: string;
-  session_status?: SessionStatus;
-  superseded_at?: string;
-  superseded_by_job_id?: string;
-  created_at: string;
-  updated_at: string;
-  input_data: string;
-  task_spec: string;
-  output_dir: string;
-  id_column_key: string;
-  records_path: string | null;
+interface ParsedJob {
+  row: JobRow;
   spec: SerializedSpec;
   settings: ResolvedSettings;
-  records: AgentJobItemRecord[];
-  cache_diagnostics: JsonObject[];
 }
 
 interface RegistryEntry extends JsonObject {
   state_version: number;
-  state_path: string;
+  database_path: string;
   job_id: string;
   record_index: number;
   handle: string;
@@ -170,6 +140,23 @@ interface RegistryEntry extends JsonObject {
 interface SupersededSession {
   jobId: string;
   reclaimedAssignments: number;
+}
+
+interface ValidationReport extends JsonObject {
+  job_id: string;
+  database: string;
+  generated_at: string;
+  valid: boolean;
+  counts: JsonObject;
+  results: JsonObject[];
+  errors: JsonObject[];
+  on_error: OnError;
+}
+
+interface ValidationSnapshot {
+  job: ParsedJob;
+  report: ValidationReport;
+  records: JsonObject[];
 }
 
 export interface QueueCounts extends JsonObject {
@@ -185,10 +172,16 @@ export interface QueueCounts extends JsonObject {
   failed: number;
 }
 
-/**
- * Coordinate durable row assignments while keeping complete row data out of the
- * parent conversation. All mutating operations are serialized per agent job.
- */
+interface OpenJobDatabase {
+  client: Client;
+  close: () => void;
+  database: AgentJobsDatabase;
+  databasePath: string;
+  destination: string;
+  jobId: string;
+}
+
+/** SQLite is the authority for queue, lease, retry, and result state. */
 export class AgentJobsRuntime {
   public readonly registryDir: string;
   public readonly projectRoot: string;
@@ -206,14 +199,14 @@ export class AgentJobsRuntime {
       = typeof options === 'string' || options instanceof URL
         ? options
         : options.registryDir;
-    const configured
-      = explicit
-        ?? process.env.AGENT_JOBS_REGISTRY_DIR
-        ?? join(this.projectRoot, '.agent-jobs', 'handles');
-    this.registryDir = absolutePath(configured);
+    this.registryDir = absolutePath(
+      explicit
+      ?? process.env.AGENT_JOBS_REGISTRY_DIR
+      ?? join(this.projectRoot, '.agent-jobs', 'handles'),
+    );
   }
 
-  /** Validate every row before creating any durable agent job or lease. */
+  /** Validate every row before creating any durable job or lease. */
   public async prepare(options: PrepareOptions): Promise<JsonObject> {
     const maxRetries = options.maxRetries ?? 1;
     const retryInvalid = options.retryInvalid ?? false;
@@ -246,22 +239,10 @@ export class AgentJobsRuntime {
     const spec = await loadSpec(options.taskSpec);
     const rows = await loadRecords(options.inputData, recordsPath);
     const preparedRows = this.preflightRows(rows, spec, options.idColumnKey);
-
     const resolvedModel = model ?? spec.model ?? null;
-    // A prompt-level model override intentionally clears a spec-level effort.
     const resolvedEffort
       = reasoningEffort ?? (model !== null ? null : (spec.reasoningEffort ?? null));
-    const jobId = randomUUID().replaceAll('-', '');
-    const destination = await canonicalPath(options.outputDir);
-    const jobsDir = join(destination, '.batch', 'jobs');
-
-    await ensureOutputLayout(destination, true);
-    const archiveRoot = join(
-      destination,
-      'history',
-      'invalid',
-      `${archiveStamp()}-${jobId}`,
-    );
+    const serializedSpec = serializeSpec(spec);
     const settings: ResolvedSettings = {
       model: resolvedModel,
       reasoning_effort: resolvedEffort,
@@ -273,70 +254,198 @@ export class AgentJobsRuntime {
       post_process_model: postProcessModel,
       post_process_reasoning_effort: postProcessReasoningEffort,
     };
-    const statePath = join(jobsDir, `${jobId}.json`);
-    const session = await withLock(sessionLockPath(destination), async () => {
-      const superseded = await this.supersedeCurrentSession(destination, jobId);
-      // Fence the previous session before taking this cache snapshot so an old
-      // worker cannot publish a result after rows have been classified.
-      const cacheDiagnostics = await this.classifyCachedRuns(
-        preparedRows,
-        spec.outputSchema,
-        destination,
-        archiveRoot,
-        retryInvalid,
-      );
+    const taskHash = hashJson(serializedSpec);
+    const executionHash = hashJson({
+      task_hash: taskHash,
+      model: resolvedModel,
+      reasoning_effort: resolvedEffort,
+    });
+    const sourceHash = hashJson(
+      preparedRows.map(record => ({ id: record.id, input_hash: record.inputHash })),
+    );
+    const destination = await canonicalPath(options.outputDir);
+    await ensureOutputLayout(destination, true);
+    const databasePath = databasePathFor(destination);
+    await ensureDatabaseStorage(databasePath, true);
+    const { client, close } = await openAgentJobsDatabase(databasePath, {
+      initialize: true,
+    });
+    const jobId = randomUUID().replaceAll('-', '');
+    const staleHandles: string[] = [];
 
-      const timestamp = now();
-      const state: AgentJobState = {
-        state_version: STATE_VERSION,
+    try {
+      const outcome = await writeTransaction(client, async (transaction) => {
+        const timestamp = now();
+        let superseded: SupersededSession | null = null;
+        const [pointer] = await transaction.select().from(currentJob).limit(1);
+        if (pointer !== undefined) {
+          const [previous] = await transaction
+            .select()
+            .from(jobs)
+            .where(eq(jobs.jobId, pointer.jobId))
+            .limit(1);
+          if (previous?.sessionStatus === 'active') {
+            const active = await transaction
+              .select({ leaseToken: jobRecords.leaseToken })
+              .from(jobRecords)
+              .where(and(
+                eq(jobRecords.jobId, previous.jobId),
+                inArray(jobRecords.status, ['leased', 'running']),
+              ));
+            for (const record of active) {
+              if (record.leaseToken !== null)
+                staleHandles.push(record.leaseToken);
+            }
+            await transaction
+              .update(jobRecords)
+              .set({
+                status: 'pending',
+                leaseToken: null,
+                leasedAt: null,
+                startedAt: null,
+              })
+              .where(and(
+                eq(jobRecords.jobId, previous.jobId),
+                inArray(jobRecords.status, ['leased', 'running']),
+              ));
+            await transaction
+              .update(jobs)
+              .set({
+                sessionStatus: 'superseded',
+                supersededAt: timestamp,
+                supersededByJobId: jobId,
+                updatedAt: timestamp,
+              })
+              .where(eq(jobs.jobId, previous.jobId));
+            superseded = {
+              jobId: previous.jobId,
+              reclaimedAssignments: staleHandles.length,
+            };
+          }
+        }
+
+        const cached = await transaction
+          .select()
+          .from(results)
+          .where(eq(results.executionHash, executionHash))
+          .orderBy(desc(results.resultId));
+        const latestResults = new Map<string, ResultRow>();
+        for (const result of cached) {
+          const key = cacheKey(result.recordId, result.inputHash);
+          if (!latestResults.has(key))
+            latestResults.set(key, result);
+        }
+
+        const cacheDiagnostics: JsonObject[] = [];
+        const persistedRecords = preparedRows.map((record) => {
+          const cachedResult = latestResults.get(
+            cacheKey(record.id, record.inputHash),
+          );
+          let status: RecordStatus = 'pending';
+          let resultId: number | null = null;
+          let cacheErrors: ValidationDiagnostic[] = [];
+          if (cachedResult !== undefined) {
+            cacheErrors = validateStoredResult(
+              cachedResult,
+              serializedSpec.output_schema,
+            );
+            if (cacheErrors.length === 0) {
+              status = 'skipped_valid';
+              resultId = cachedResult.resultId;
+            } else if (!retryInvalid) {
+              status = 'skipped_invalid';
+              resultId = cachedResult.resultId;
+              cacheDiagnostics.push({
+                id: record.id,
+                result_id: cachedResult.resultId,
+                errors: cacheErrors,
+              });
+            }
+          }
+          return {
+            jobId,
+            inputIndex: record.index,
+            recordId: record.id,
+            inputHash: record.inputHash,
+            inputJson: stringifyStrictJson(record.input, { sortKeys: true }),
+            status,
+            attempts: 0,
+            leaseToken: null,
+            lastErrorJson: null,
+            leasedAt: null,
+            startedAt: null,
+            completedAt: status === 'skipped_valid' ? timestamp : null,
+            cacheValidationErrorsJson: cacheErrors.length === 0
+              ? null
+              : stringifyStrictJson(cacheErrors, { sortKeys: true }),
+            resultId,
+          };
+        });
+
+        await transaction.insert(jobs).values({
+          jobId,
+          stateVersion: STATE_VERSION,
+          sessionStatus: 'active',
+          supersededAt: null,
+          supersededByJobId: null,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          inputData: absolutePath(options.inputData),
+          taskSpec: absolutePath(spec.path),
+          outputDir: destination,
+          idColumnKey: options.idColumnKey,
+          recordsPath,
+          sourceHash,
+          taskHash,
+          executionHash,
+          specJson: stringifyStrictJson(serializedSpec, { sortKeys: true }),
+          settingsJson: stringifyStrictJson(settings, { sortKeys: true }),
+          cacheDiagnosticsJson: stringifyStrictJson(cacheDiagnostics, {
+            sortKeys: true,
+          }),
+        });
+        for (const recordChunk of chunks(persistedRecords, INSERT_CHUNK_SIZE))
+          await transaction.insert(jobRecords).values(recordChunk);
+        await transaction
+          .insert(currentJob)
+          .values({ slot: 1, jobId })
+          .onConflictDoUpdate({ target: currentJob.slot, set: { jobId } });
+        return {
+          cacheDiagnostics,
+          counts: countsFromStatuses(persistedRecords),
+          superseded,
+        };
+      });
+
+      for (const handle of staleHandles)
+        await safeUnlink(this.registryPath(handle));
+      return {
+        ok: true,
         job_id: jobId,
         session_status: 'active',
-        created_at: timestamp,
-        updated_at: timestamp,
-        input_data: absolutePath(options.inputData),
-        task_spec: absolutePath(spec.path),
         output_dir: destination,
-        id_column_key: options.idColumnKey,
-        records_path: recordsPath,
-        spec: serializeSpec(spec),
+        database: databasePath,
+        source_hash: sourceHash,
+        task_hash: taskHash,
+        execution_hash: executionHash,
+        counts: outcome.counts,
+        worker: { model: resolvedModel, reasoning_effort: resolvedEffort },
+        postprocessor: {
+          model: postProcessModel,
+          reasoning_effort: postProcessReasoningEffort,
+        },
         settings,
-        records: preparedRows,
-        cache_diagnostics: cacheDiagnostics,
+        cache_diagnostics: outcome.cacheDiagnostics,
+        ...(outcome.superseded === null
+          ? {}
+          : {
+              superseded_job_id: outcome.superseded.jobId,
+              reclaimed_assignments: outcome.superseded.reclaimedAssignments,
+            }),
       };
-      await ensureOutputLayout(destination, false);
-      await atomicWriteJson(statePath, state, { noClobber: true });
-      await ensureOutputLayout(destination, false);
-      await atomicWriteJson(join(destination, '.batch', 'current.json'), {
-        job_id: jobId,
-        state_path: statePath,
-      });
-      return { state, superseded };
-    });
-
-    return {
-      ok: true,
-      job_id: jobId,
-      session_status: 'active',
-      output_dir: destination,
-      counts: counts(session.state),
-      worker: {
-        model: resolvedModel,
-        reasoning_effort: resolvedEffort,
-      },
-      postprocessor: {
-        model: postProcessModel,
-        reasoning_effort: postProcessReasoningEffort,
-      },
-      settings,
-      cache_diagnostics: session.state.cache_diagnostics,
-      ...(session.superseded === null
-        ? {}
-        : {
-            superseded_job_id: session.superseded.jobId,
-            reclaimed_assignments:
-              session.superseded.reclaimedAssignments,
-          }),
-    };
+    } finally {
+      close();
+    }
   }
 
   /** Lease pending rows, returning only canonical IDs and opaque handles. */
@@ -347,113 +456,155 @@ export class AgentJobsRuntime {
   ): Promise<JsonObject> {
     const requested = options.count ?? 1;
     if (!Number.isInteger(requested) || requested < 1) {
-      throw new AgentJobsError(
-        'invalid_count',
-        'count must be a positive integer',
-      );
+      throw new AgentJobsError('invalid_count', 'count must be a positive integer');
     }
-    const statePath = await this.statePath(outputDir, jobId);
-
-    return await withLock(lockPath(statePath), async () => {
-      const state = await this.readState(statePath);
-      await ensureStateOutputLayout(state);
-      assertActiveSession(state);
-      await this.reconcileCommittedRuns(state);
-      const active = state.records.filter(record =>
-        ACTIVE_STATUSES.has(record.status),
-      ).length;
-      const configuredCap = state.settings.max_concurrency;
-      const leaseLimit
-        = configuredCap === null
+    const opened = await this.openJobDatabase(outputDir, jobId);
+    const createdHandles: string[] = [];
+    try {
+      return await writeTransaction(opened.client, async (transaction) => {
+        const job = parseJob(await requireJob(transaction, opened.jobId));
+        assertActiveSession(job.row);
+        const [activeCount] = await transaction
+          .select({ value: sql<number>`count(*)` })
+          .from(jobRecords)
+          .where(and(
+            eq(jobRecords.jobId, opened.jobId),
+            inArray(jobRecords.status, ['leased', 'running']),
+          ));
+        const active = Number(activeCount?.value ?? 0);
+        const configuredCap = job.settings.max_concurrency;
+        const leaseLimit = configuredCap === null
           ? requested
           : Math.min(requested, Math.max(configuredCap - active, 0));
-      const assignments: JsonObject[] = [];
-
-      for (const record of state.records) {
-        if (assignments.length >= leaseLimit)
-          break;
-        if (record.status !== 'pending')
-          continue;
-
-        const handle = await this.newHandle();
-        record.status = 'leased';
-        record.attempts += 1;
-        record.handle = handle;
-        record.leased_at = now();
-        const registry: RegistryEntry = {
-          state_version: STATE_VERSION,
-          state_path: statePath,
-          job_id: state.job_id,
-          record_index: record.index,
-          handle,
+        const pending = leaseLimit === 0
+          ? []
+          : await transaction
+              .select()
+              .from(jobRecords)
+              .where(and(
+                eq(jobRecords.jobId, opened.jobId),
+                eq(jobRecords.status, 'pending'),
+              ))
+              .orderBy(asc(jobRecords.inputIndex))
+              .limit(leaseLimit);
+        const assignments: JsonObject[] = [];
+        for (const record of pending) {
+          const handle = await this.newHandle();
+          const registry: RegistryEntry = {
+            state_version: STATE_VERSION,
+            database_path: opened.databasePath,
+            job_id: opened.jobId,
+            record_index: record.inputIndex,
+            handle,
+          };
+          await atomicWriteJson(this.registryPath(handle), registry, {
+            noClobber: true,
+          });
+          createdHandles.push(handle);
+          const changed = await transaction
+            .update(jobRecords)
+            .set({
+              status: 'leased',
+              attempts: record.attempts + 1,
+              leaseToken: handle,
+              leasedAt: now(),
+            })
+            .where(and(
+              eq(jobRecords.jobId, opened.jobId),
+              eq(jobRecords.recordId, record.recordId),
+              eq(jobRecords.status, 'pending'),
+            ))
+            .returning({ recordId: jobRecords.recordId });
+          if (changed.length === 0) {
+            await safeUnlink(this.registryPath(handle));
+            continue;
+          }
+          assignments.push({ id: record.recordId, handle });
+        }
+        const statuses = await transaction
+          .select({ status: jobRecords.status })
+          .from(jobRecords)
+          .where(eq(jobRecords.jobId, opened.jobId));
+        return {
+          ok: true,
+          job_id: opened.jobId,
+          assignments,
+          counts: countsFromStatuses(statuses),
         };
-        await atomicWriteJson(this.registryPath(handle), registry, {
-          noClobber: true,
-        });
-        assignments.push({ id: record.id, handle });
-      }
-
-      await this.saveState(statePath, state);
-      return {
-        ok: true,
-        job_id: state.job_id,
-        assignments,
-        counts: counts(state),
-      };
-    });
+      });
+    } catch (error) {
+      for (const handle of createdHandles)
+        await safeUnlink(this.registryPath(handle));
+      throw error;
+    } finally {
+      opened.close();
+    }
   }
 
-  /** Consume a lease once and return one exact, schema-consistent worker payload. */
+  /** Consume a lease once and return one schema-consistent worker payload. */
   public async getAssignment(handle: string): Promise<JsonObject> {
-    const registry = await this.readRegistry(handle);
-    const statePath = await this.registryStatePath(registry);
-
-    return await withLock(lockPath(statePath), async () => {
-      const state = await this.readState(statePath);
-      await ensureStateOutputLayout(state);
-      assertActiveSession(state);
-      const record = recordForRegistry(state, registry, handle);
-      if (record.status === 'running') {
-        throw new AgentJobsError(
-          'handle_consumed',
-          'This assignment handle was already retrieved',
+    const opened = await this.openHandleDatabase(handle);
+    try {
+      return await writeTransaction(opened.client, async (transaction) => {
+        const job = parseJob(await requireJob(transaction, opened.registry.job_id));
+        assertActiveSession(job.row);
+        const record = await requireHandleRecord(
+          transaction,
+          opened.registry,
+          handle,
         );
-      }
-      if (record.status !== 'leased') {
-        throw new AgentJobsError(
-          'invalid_handle',
-          'This assignment handle is no longer active',
-        );
-      }
-      record.status = 'running';
-      record.started_at = now();
-      await this.saveState(statePath, state);
-
-      const properties = schemaProperties(state.spec.input_schema);
-      const payload: JsonObject = {
-        input: record.input,
-        task_spec: {
-          name: state.spec.name,
-          version: state.spec.version,
-          description: state.spec.description,
-          instructions: state.spec.instructions,
-          input_schema: state.spec.input_schema,
-          output_schema: state.spec.output_schema,
-        },
-        attempt: record.attempts,
-        model: state.settings.model,
-        reasoning_effort: state.settings.reasoning_effort,
-      };
-      if (Object.hasOwn(properties, state.id_column_key)) {
-        payload.id = record.id;
-      }
-      return payload;
-    });
+        if (record.status === 'running') {
+          throw new AgentJobsError(
+            'handle_consumed',
+            'This assignment handle was already retrieved',
+          );
+        }
+        if (record.status !== 'leased') {
+          throw new AgentJobsError(
+            'invalid_handle',
+            'This assignment handle is no longer active',
+          );
+        }
+        await transaction
+          .update(jobRecords)
+          .set({ status: 'running', startedAt: now() })
+          .where(and(
+            eq(jobRecords.jobId, record.jobId),
+            eq(jobRecords.recordId, record.recordId),
+            eq(jobRecords.leaseToken, handle),
+          ));
+        const payload: JsonObject = {
+          input: parseStoredInput(record, job.spec.input_schema),
+          task_spec: {
+            name: job.spec.name,
+            version: job.spec.version,
+            description: job.spec.description,
+            instructions: job.spec.instructions,
+            input_schema: job.spec.input_schema,
+            output_schema: job.spec.output_schema,
+          },
+          attempt: record.attempts,
+          model: job.settings.model,
+          reasoning_effort: job.settings.reasoning_effort,
+        };
+        if (
+          Object.hasOwn(
+            schemaProperties(job.spec.input_schema),
+            job.row.idColumnKey,
+          )
+        ) {
+          payload.id = record.recordId;
+        }
+        return payload;
+      });
+    } finally {
+      opened.close();
+    }
   }
 
-  /** Validate and atomically publish a pure row result without overwriting. */
+  /** Validate and atomically commit a row result in the same database. */
   public async submitResult(handle: string, result: unknown): Promise<JsonObject> {
-    if (!isObject(result)) {
+    if (!isObject(result) || isPreciseNumber(result)) {
       throw new AgentJobsError(
         'output_validation_failed',
         'Worker result must be a JSON object',
@@ -468,62 +619,85 @@ export class AgentJobsRuntime {
         [{ path: '', message: jsonProblem, validator: 'json' }],
       );
     }
-
-    const registry = await this.readRegistry(handle);
-    const statePath = await this.registryStatePath(registry);
-    const outcome = await withLock(lockPath(statePath), async () => {
-      const state = await this.readState(statePath);
-      await ensureStateOutputLayout(state);
-      assertActiveSession(state);
-      const record = recordForRegistry(state, registry, handle);
-      if (record.status !== 'running') {
-        const code = TERMINAL_STATUSES.has(record.status)
-          ? 'handle_consumed'
-          : 'invalid_handle';
-        throw new AgentJobsError(
-          code,
-          'This assignment handle cannot submit a result',
-        );
-      }
-      const errors = validationErrors(result, state.spec.output_schema);
-      if (errors.length > 0) {
-        throw new AgentJobsError(
-          'output_validation_failed',
-          'Worker result does not satisfy output_schema',
-          errors,
-        );
-      }
-
-      const runPath = runPathFor(state, record);
-      try {
-        await ensureStateOutputLayout(state);
-        await atomicWriteJson(runPath, result, { noClobber: true });
-      } catch (error) {
-        if (error instanceof AgentJobsError && error.code === 'target_exists') {
-          throw new AgentJobsError(
-            'output_exists',
-            'A result already exists for this row; refusing to overwrite it',
-            error.details,
+    const opened = await this.openHandleDatabase(handle);
+    try {
+      const outcome = await writeTransaction(
+        opened.client,
+        async (transaction) => {
+          const job = parseJob(await requireJob(transaction, opened.registry.job_id));
+          assertActiveSession(job.row);
+          const record = await requireHandleRecord(
+            transaction,
+            opened.registry,
+            handle,
           );
-        }
-        throw error;
-      }
-      record.status = 'completed';
-      record.completed_at = now();
-      record.handle = null;
-      await this.saveState(statePath, state);
-      return { state, record, runPath };
-    });
-
-    await ensureStateOutputLayout(outcome.state);
-    await safeUnlink(this.registryPath(handle));
-    await safeUnlink(errorPathFor(outcome.state, outcome.record));
-    return {
-      ok: true,
-      id: outcome.record.id,
-      path: outcome.runPath,
-      status: 'completed',
-    };
+          if (record.status !== 'running') {
+            const code = TERMINAL_STATUSES.has(record.status as RecordStatus)
+              ? 'handle_consumed'
+              : 'invalid_handle';
+            throw new AgentJobsError(
+              code,
+              'This assignment handle cannot submit a result',
+            );
+          }
+          const errors = validationErrors(result, job.spec.output_schema);
+          if (errors.length > 0) {
+            throw new AgentJobsError(
+              'output_validation_failed',
+              'Worker result does not satisfy output_schema',
+              errors,
+            );
+          }
+          const outputJson = stringifyStrictJson(result, { sortKeys: true });
+          const [stored] = await transaction
+            .insert(results)
+            .values({
+              recordId: record.recordId,
+              inputHash: record.inputHash,
+              executionHash: job.row.executionHash,
+              outputJson,
+              outputHash: hashText(outputJson),
+              createdAt: now(),
+            })
+            .returning({ resultId: results.resultId });
+          if (stored === undefined)
+            throw new AgentJobsError('storage_error', 'Result insert returned no ID');
+          const changed = await transaction
+            .update(jobRecords)
+            .set({
+              status: 'completed',
+              resultId: stored.resultId,
+              completedAt: now(),
+              leaseToken: null,
+              cacheValidationErrorsJson: null,
+            })
+            .where(and(
+              eq(jobRecords.jobId, record.jobId),
+              eq(jobRecords.recordId, record.recordId),
+              eq(jobRecords.status, 'running'),
+              eq(jobRecords.leaseToken, handle),
+            ))
+            .returning({ recordId: jobRecords.recordId });
+          if (changed.length === 0) {
+            throw new AgentJobsError(
+              'handle_consumed',
+              'This assignment handle cannot submit a result',
+            );
+          }
+          return { id: record.recordId, resultId: stored.resultId };
+        },
+      );
+      await safeUnlink(this.registryPath(handle));
+      return {
+        ok: true,
+        id: outcome.id,
+        result_id: outcome.resultId,
+        database: opened.databasePath,
+        status: 'completed',
+      };
+    } finally {
+      opened.close();
+    }
   }
 
   /** Record a failed attempt, requeueing until the retry budget is exhausted. */
@@ -533,10 +707,7 @@ export class AgentJobsRuntime {
     message: string,
   ): Promise<JsonObject> {
     if (typeof code !== 'string' || code.trim().length === 0) {
-      throw new AgentJobsError(
-        'invalid_failure',
-        'Failure code must be non-empty',
-      );
+      throw new AgentJobsError('invalid_failure', 'Failure code must be non-empty');
     }
     if (typeof message !== 'string' || message.trim().length === 0) {
       throw new AgentJobsError(
@@ -544,69 +715,60 @@ export class AgentJobsRuntime {
         'Failure message must be non-empty',
       );
     }
-    const registry = await this.readRegistry(handle);
-    const statePath = await this.registryStatePath(registry);
-    const outcome = await withLock(lockPath(statePath), async () => {
-      const state = await this.readState(statePath);
-      await ensureStateOutputLayout(state);
-      assertActiveSession(state);
-      const record = recordForRegistry(state, registry, handle);
-      if (!ACTIVE_STATUSES.has(record.status)) {
-        throw new AgentJobsError(
-          'handle_consumed',
-          'This assignment handle is no longer active',
-        );
-      }
-      const committedPath = runPathFor(state, record);
-      if (await managedFileExists(committedPath)) {
-        const committedErrors = await this.validateRunFile(
-          committedPath,
-          state.spec.output_schema,
-        );
-        if (committedErrors.length === 0) {
-          const staleHandle = record.handle;
-          record.status = 'completed';
-          record.completed_at ??= now();
-          record.cache_validation_errors = [];
-          record.handle = null;
-          await this.saveState(statePath, state);
-          if (staleHandle !== null) {
-            await safeUnlink(this.registryPath(staleHandle));
+    const opened = await this.openHandleDatabase(handle);
+    try {
+      const outcome = await writeTransaction(
+        opened.client,
+        async (transaction) => {
+          const job = parseJob(await requireJob(transaction, opened.registry.job_id));
+          assertActiveSession(job.row);
+          const record = await requireHandleRecord(
+            transaction,
+            opened.registry,
+            handle,
+          );
+          if (!ACTIVE_STATUSES.has(record.status as RecordStatus)) {
+            throw new AgentJobsError(
+              'handle_consumed',
+              'This assignment handle is no longer active',
+            );
           }
-          await safeUnlink(errorPathFor(state, record));
-          return { record, terminal: true, reconciled: true };
-        }
-      }
-      const failure: FailureRecord = {
-        id: record.id,
-        code: code.trim(),
-        message: message.trim(),
-        attempts: record.attempts,
-        failed_at: now(),
-      };
-      record.last_error = failure;
-      record.handle = null;
-      const terminal = record.attempts > state.settings.max_retries;
-      if (terminal) {
-        record.status = 'failed';
-        await ensureStateOutputLayout(state);
-        await atomicWriteJson(errorPathFor(state, record), failure);
-      } else {
-        record.status = 'pending';
-      }
-      await this.saveState(statePath, state);
-      return { record, terminal, reconciled: false };
-    });
-
-    await safeUnlink(this.registryPath(handle));
-    return {
-      ok: true,
-      id: outcome.record.id,
-      terminal: outcome.terminal,
-      status: outcome.record.status,
-      attempts: outcome.record.attempts,
-      ...(outcome.reconciled ? { reconciled: true } : {}),
-    };
+          const failure: FailureRecord = {
+            id: record.recordId,
+            code: code.trim(),
+            message: message.trim(),
+            attempts: record.attempts,
+            failed_at: now(),
+          };
+          const terminal = record.attempts > job.settings.max_retries;
+          const status: RecordStatus = terminal ? 'failed' : 'pending';
+          await transaction
+            .update(jobRecords)
+            .set({
+              status,
+              leaseToken: null,
+              lastErrorJson: stringifyStrictJson(failure, { sortKeys: true }),
+              leasedAt: null,
+              startedAt: null,
+            })
+            .where(and(
+              eq(jobRecords.jobId, record.jobId),
+              eq(jobRecords.recordId, record.recordId),
+              eq(jobRecords.leaseToken, handle),
+            ));
+          return {
+            id: record.recordId,
+            terminal,
+            status,
+            attempts: record.attempts,
+          };
+        },
+      );
+      await safeUnlink(this.registryPath(handle));
+      return { ok: true, ...outcome };
+    } finally {
+      opened.close();
+    }
   }
 
   /** Return queue state without exposing row input or output values. */
@@ -614,55 +776,66 @@ export class AgentJobsRuntime {
     outputDir: PathInput,
     jobId: string | null = null,
   ): Promise<JsonObject> {
-    const statePath = await this.statePath(outputDir, jobId);
-    return await withLock(lockPath(statePath), async () => {
-      const state = await this.readState(statePath);
-      await ensureStateOutputLayout(state);
-      if (
-        sessionStatus(state) === 'active'
-        && await this.reconcileCommittedRuns(state)
-      ) {
-        await this.saveState(statePath, state);
-      }
-      return {
-        ok: true,
-        job_id: state.job_id,
-        session_status: sessionStatus(state),
-        ...(state.superseded_by_job_id === undefined
-          ? {}
-          : { superseded_by_job_id: state.superseded_by_job_id }),
-        output_dir: state.output_dir,
-        counts: counts(state),
-        rows: state.records.map(record => ({
-          id: record.id,
-          status: record.status,
-          attempts: record.attempts,
-          ...(record.last_error === null
+    const opened = await this.openJobDatabase(outputDir, jobId);
+    try {
+      return await opened.database.transaction(async (transaction) => {
+        const job = parseJob(await requireJob(transaction, opened.jobId));
+        const records = await transaction
+          .select()
+          .from(jobRecords)
+          .where(eq(jobRecords.jobId, opened.jobId))
+          .orderBy(asc(jobRecords.inputIndex));
+        return {
+          ok: true,
+          job_id: job.row.jobId,
+          session_status: job.row.sessionStatus,
+          ...(job.row.supersededByJobId === null
             ? {}
-            : { last_error: record.last_error }),
-        })),
-      };
-    });
+            : { superseded_by_job_id: job.row.supersededByJobId }),
+          output_dir: job.row.outputDir,
+          database: opened.databasePath,
+          counts: countsFromStatuses(records),
+          rows: records.map(record => ({
+            id: record.recordId,
+            input_hash: record.inputHash,
+            status: record.status,
+            attempts: record.attempts,
+            ...(record.lastErrorJson === null
+              ? {}
+              : {
+                  last_error: parseJsonObject(
+                    record.lastErrorJson,
+                    'last error',
+                  ),
+                }),
+          })),
+        };
+      });
+    } finally {
+      opened.close();
+    }
   }
 
-  /** Validate every expected run and persist the final report. */
+  /** Validate every expected result from one consistent database snapshot. */
   public async validate(
     outputDir: PathInput,
     jobId: string | null = null,
   ): Promise<JsonObject> {
-    const statePath = await this.statePath(outputDir, jobId);
-    return await withLock(lockPath(statePath), async () => {
-      const state = await this.readState(statePath);
-      await ensureStateOutputLayout(state);
-      assertActiveSession(state);
-      if (await this.reconcileCommittedRuns(state)) {
-        await this.saveState(statePath, state);
-      }
-      const report = await this.buildValidationReport(state);
-      await ensureStateOutputLayout(state);
-      await atomicWriteJson(join(state.output_dir, 'report.json'), report);
-      return { ok: true, ...report };
-    });
+    const opened = await this.openJobDatabase(outputDir, jobId);
+    try {
+      const snapshot = await buildValidationSnapshot(
+        opened.database,
+        opened.jobId,
+        opened.databasePath,
+      );
+      await atomicWriteJson(
+        join(opened.destination, 'report.json'),
+        snapshot.report,
+      );
+      return { ok: true, ...snapshot.report };
+    } finally {
+      opened.close();
+    }
   }
 
   /** Collect valid results in input order into one deterministic artifact. */
@@ -671,64 +844,65 @@ export class AgentJobsRuntime {
     jobId: string | null = null,
     options: { format?: CollectFormat | null } = {},
   ): Promise<JsonObject> {
-    const statePath = await this.statePath(outputDir, jobId);
-    return await withLock(lockPath(statePath), async () => {
-      const state = await this.readState(statePath);
-      await ensureStateOutputLayout(state);
-      assertActiveSession(state);
+    const opened = await this.openJobDatabase(outputDir, jobId);
+    try {
+      const snapshot = await buildValidationSnapshot(
+        opened.database,
+        opened.jobId,
+        opened.databasePath,
+      );
       const selectedFormat
-        = options.format ?? state.settings.collect_format;
+        = options.format ?? snapshot.job.settings.collect_format;
       if (!COLLECT_FORMATS.has(selectedFormat)) {
         throw new AgentJobsError(
           'invalid_collect_format',
           'format must be none, json, jsonl, or csv',
         );
       }
-      if (await this.reconcileCommittedRuns(state)) {
-        await this.saveState(statePath, state);
-      }
-      const report = await this.buildValidationReport(state);
-      await ensureStateOutputLayout(state);
-      await atomicWriteJson(join(state.output_dir, 'report.json'), report);
-      if (!report.valid && state.settings.on_error === 'stop') {
+      await atomicWriteJson(
+        join(opened.destination, 'report.json'),
+        snapshot.report,
+      );
+      if (!snapshot.report.valid && snapshot.job.settings.on_error === 'stop') {
         throw new AgentJobsError(
           'batch_failed',
           'Collection is blocked because final validation failed',
-          report.errors,
+          snapshot.report.errors,
         );
       }
-      const records = await this.validCollectedRecords(state);
       if (selectedFormat === 'none') {
         return {
           ok: true,
-          job_id: state.job_id,
+          job_id: opened.jobId,
           format: 'none',
           path: null,
-          count: records.length,
+          count: snapshot.records.length,
+          partial: !snapshot.report.valid,
         };
       }
       const collectionPath = join(
-        state.output_dir,
+        opened.destination,
         `collected.${selectedFormat}`,
       );
-      await ensureStateOutputLayout(state);
       await writeCollection(
         collectionPath,
         selectedFormat,
-        records,
-        state.id_column_key,
-        state.spec.output_schema,
-        state.spec.output_field_order,
+        snapshot.records,
+        snapshot.job.row.idColumnKey,
+        snapshot.job.spec.output_schema,
+        snapshot.job.spec.output_field_order,
       );
       return {
         ok: true,
-        job_id: state.job_id,
+        job_id: opened.jobId,
         format: selectedFormat,
         path: collectionPath,
-        count: records.length,
-        partial: !report.valid,
+        count: snapshot.records.length,
+        partial: !snapshot.report.valid,
       };
-    });
+    } finally {
+      opened.close();
+    }
   }
 
   /** Run local configuration and storage checks without invoking a model. */
@@ -743,141 +917,17 @@ export class AgentJobsRuntime {
     const [majorText = '0', minorText = '0'] = nodeVersion.split('.');
     const major = Number.parseInt(majorText, 10);
     const minor = Number.parseInt(minorText, 10);
-    const nodeSupported = major > 20 || (major === 20 && minor >= 6);
     checks.push({
       name: 'node',
-      ok: nodeSupported,
+      ok: major > 20 || (major === 20 && minor >= 6),
       detail: { version: nodeVersion, required: '>=20.6' },
     });
 
-    const userHome = homedir();
-    const hostFiles = {
-      codex: [
-        {
-          scope: 'project',
-          paths: [
-            join(this.projectRoot, 'AGENTS.md'),
-            join(this.projectRoot, '.codex', 'config.toml'),
-            join(this.projectRoot, '.codex', 'agents', 'agent_job_worker.toml'),
-            join(
-              this.projectRoot,
-              '.codex',
-              'agents',
-              'agent_job_postprocessor.toml',
-            ),
-            join(
-              this.projectRoot,
-              '.agents',
-              'skills',
-              'agent-jobs',
-              'SKILL.md',
-            ),
-            join(
-              this.projectRoot,
-              '.agents',
-              'skills',
-              'agent-jobs',
-              'scripts',
-              'agent-jobs.mjs',
-            ),
-          ],
-        },
-        {
-          scope: 'global',
-          paths: [
-            join(userHome, '.codex', 'AGENTS.md'),
-            join(userHome, '.codex', 'config.toml'),
-            join(userHome, '.codex', 'agents', 'agent_job_worker.toml'),
-            join(userHome, '.codex', 'agents', 'agent_job_postprocessor.toml'),
-            join(userHome, '.agents', 'skills', 'agent-jobs', 'SKILL.md'),
-            join(
-              userHome,
-              '.agents',
-              'skills',
-              'agent-jobs',
-              'scripts',
-              'agent-jobs.mjs',
-            ),
-          ],
-        },
-        {
-          scope: 'development',
-          paths: [
-            join(this.projectRoot, 'AGENTS.md'),
-            join(this.projectRoot, '.codex', 'config.toml'),
-            join(this.projectRoot, '.codex', 'agents', 'agent_job_worker.toml'),
-            join(
-              this.projectRoot,
-              '.codex',
-              'agents',
-              'agent_job_postprocessor.toml',
-            ),
-            join(
-              this.projectRoot,
-              '.agents',
-              'skills',
-              'agent-jobs',
-              'SKILL.md',
-            ),
-            join(this.projectRoot, 'dist', 'agent-jobs.mjs'),
-          ],
-        },
-      ],
-      claude: [
-        {
-          scope: 'project',
-          paths: [
-            join(this.projectRoot, 'CLAUDE.md'),
-            join(this.projectRoot, '.mcp.json'),
-            join(this.projectRoot, '.claude', 'settings.local.json'),
-            join(this.projectRoot, '.claude', 'agents', 'agent_job_worker.md'),
-            join(
-              this.projectRoot,
-              '.claude',
-              'agents',
-              'agent_job_postprocessor.md',
-            ),
-            join(
-              this.projectRoot,
-              '.claude',
-              'skills',
-              'agent-jobs',
-              'SKILL.md',
-            ),
-            join(
-              this.projectRoot,
-              '.claude',
-              'skills',
-              'agent-jobs',
-              'scripts',
-              'agent-jobs.mjs',
-            ),
-          ],
-        },
-        {
-          scope: 'global',
-          paths: [
-            join(userHome, '.claude', 'CLAUDE.md'),
-            join(userHome, '.claude.json'),
-            join(userHome, '.claude', 'settings.json'),
-            join(userHome, '.claude', 'agents', 'agent_job_worker.md'),
-            join(userHome, '.claude', 'agents', 'agent_job_postprocessor.md'),
-            join(userHome, '.claude', 'skills', 'agent-jobs', 'SKILL.md'),
-            join(
-              userHome,
-              '.claude',
-              'skills',
-              'agent-jobs',
-              'scripts',
-              'agent-jobs.mjs',
-            ),
-          ],
-        },
-      ],
-    };
     const installation: Record<string, unknown> = {};
     let installed = false;
-    for (const [host, candidates] of Object.entries(hostFiles)) {
+    for (const [host, candidates] of Object.entries(
+      installationCandidates(this.projectRoot, homedir()),
+    )) {
       const details: JsonObject[] = [];
       let hostInstalled = false;
       for (const candidate of candidates) {
@@ -916,11 +966,7 @@ export class AgentJobsRuntime {
       );
       await atomicWriteText(probe, 'ok\n', { noClobber: true });
       await safeUnlink(probe);
-      checks.push({
-        name: 'handle_registry',
-        ok: true,
-        detail: this.registryDir,
-      });
+      checks.push({ name: 'handle_registry', ok: true, detail: this.registryDir });
     } catch (error) {
       checks.push({
         name: 'handle_registry',
@@ -937,26 +983,27 @@ export class AgentJobsRuntime {
         checks.push({
           name: 'task_spec',
           ok: false,
-          detail:
-            error instanceof AgentJobsError
-              ? error.asDict()
-              : errorMessage(error),
+          detail: diagnostic(error),
         });
       }
     }
     if (options.outputDir !== undefined && options.outputDir !== null) {
+      let opened: OpenJobDatabase | undefined;
       try {
-        const current = await this.statePath(options.outputDir, null);
-        checks.push({ name: 'output_dir', ok: true, detail: current });
+        opened = await this.openJobDatabase(options.outputDir, null);
+        checks.push({
+          name: 'output_dir',
+          ok: true,
+          detail: { database: opened.databasePath, job_id: opened.jobId },
+        });
       } catch (error) {
         checks.push({
           name: 'output_dir',
           ok: false,
-          detail:
-            error instanceof AgentJobsError
-              ? error.asDict()
-              : errorMessage(error),
+          detail: diagnostic(error),
         });
+      } finally {
+        opened?.close();
       }
     }
 
@@ -970,93 +1017,15 @@ export class AgentJobsRuntime {
     };
   }
 
-  /** Fence the previous output-directory session before a replacement starts. */
-  private async supersedeCurrentSession(
-    destination: string,
-    replacementJobId: string,
-  ): Promise<SupersededSession | null> {
-    const pointerPath = join(destination, '.batch', 'current.json');
-    if (!(await managedFileExists(pointerPath)))
-      return null;
-
-    const previousStatePath = await this.statePath(destination, null);
-    return await withLock(lockPath(previousStatePath), async () => {
-      const state = await this.readState(previousStatePath);
-      await ensureStateOutputLayout(state);
-      if (sessionStatus(state) === 'superseded') {
-        return { jobId: state.job_id, reclaimedAssignments: 0 };
-      }
-
-      await this.reconcileCommittedRuns(state);
-      const staleHandles: string[] = [];
-      for (const record of state.records) {
-        if (!ACTIVE_STATUSES.has(record.status))
-          continue;
-        if (record.handle !== null)
-          staleHandles.push(record.handle);
-        record.status = 'pending';
-        record.handle = null;
-        delete record.leased_at;
-        delete record.started_at;
-      }
-
-      state.session_status = 'superseded';
-      state.superseded_at = now();
-      state.superseded_by_job_id = replacementJobId;
-      await this.saveState(previousStatePath, state);
-      for (const handle of staleHandles)
-        await safeUnlink(this.registryPath(handle));
-
-      return {
-        jobId: state.job_id,
-        reclaimedAssignments: staleHandles.length,
-      };
-    });
-  }
-
-  private async classifyCachedRuns(
-    records: AgentJobItemRecord[],
-    outputSchema: JsonSchema,
-    destination: string,
-    archiveRoot: string,
-    retryInvalid: boolean,
-  ): Promise<JsonObject[]> {
-    const diagnostics: JsonObject[] = [];
-    const runsDir = join(destination, 'runs');
-    for (const record of records) {
-      await ensureOutputLayout(destination, false);
-      const runPath = join(runsDir, `${record.safe_id}.json`);
-      if (!(await managedFileExists(runPath))) {
-        record.status = 'pending';
-        continue;
-      }
-      const errors = await this.validateRunFile(runPath, outputSchema);
-      if (errors.length > 0 && retryInvalid) {
-        const archivePath = join(archiveRoot, basename(runPath));
-        await ensureArchiveDirectory(archiveRoot);
-        await atomicMove(runPath, archivePath);
-        record.status = 'pending';
-        record.archived_invalid_path = archivePath;
-        continue;
-      }
-      record.status = errors.length > 0 ? 'skipped_invalid' : 'skipped_valid';
-      record.cache_validation_errors = errors;
-      if (errors.length > 0)
-        diagnostics.push({ id: record.id, path: runPath, errors });
-    }
-    return diagnostics;
-  }
-
   private preflightRows(
     rows: JsonObject[],
     spec: TaskSpec,
     idColumnKey: string,
-  ): AgentJobItemRecord[] {
-    const prepared: AgentJobItemRecord[] = [];
+  ): PreparedRecord[] {
+    const prepared: PreparedRecord[] = [];
     const diagnostics: JsonObject[] = [];
     const duplicateDiagnostics: JsonObject[] = [];
     const identifiers = new Map<string, number>();
-    const filenames = new Map<string, string>();
     const properties = schemaProperties(spec.inputSchema);
 
     for (const [index, source] of rows.entries()) {
@@ -1081,8 +1050,6 @@ export class AgentJobsRuntime {
           });
         }
       }
-
-      let safeId: string;
       if (identifier !== null) {
         const firstIndex = identifiers.get(identifier);
         if (firstIndex !== undefined) {
@@ -1094,23 +1061,8 @@ export class AgentJobsRuntime {
         } else {
           identifiers.set(identifier, index);
         }
-        safeId = safeIdFilename(identifier);
-        const filenameKey = safeId.toLowerCase();
-        const existing = filenames.get(filenameKey);
-        if (existing !== undefined && existing !== identifier) {
-          diagnostics.push({
-            row: index,
-            code: 'id_filename_collision',
-            id: identifier,
-          });
-        }
-        filenames.set(filenameKey, identifier);
-      } else {
-        safeId = `invalid-row-${index}`;
       }
 
-      // Dynamic JSON field names such as `__proto__` must remain data, not invoke
-      // Object.prototype's legacy setter.
       const projected = Object.create(null) as JsonObject;
       for (const key of Object.keys(properties)) {
         if (Object.hasOwn(source, key))
@@ -1134,16 +1086,12 @@ export class AgentJobsRuntime {
           ...error,
         });
       }
+      const id = identifier ?? `invalid-row-${index}`;
       prepared.push({
         index,
-        // This placeholder never survives a successful preflight.
-        id: identifier ?? `invalid-row-${index}`,
-        safe_id: safeId,
+        id,
         input: projected,
-        status: 'pending',
-        attempts: 0,
-        handle: null,
-        last_error: null,
+        inputHash: hashJson({ id, input: projected }),
       });
     }
 
@@ -1208,10 +1156,7 @@ export class AgentJobsRuntime {
         'retry_invalid must be a boolean',
       );
     }
-    if (
-      options.onError !== 'stop'
-      && options.onError !== 'continue_successes'
-    ) {
+    if (options.onError !== 'stop' && options.onError !== 'continue_successes') {
       throw new AgentJobsError(
         'invalid_on_error',
         'on_error must be stop or continue_successes',
@@ -1240,76 +1185,42 @@ export class AgentJobsRuntime {
     }
   }
 
-  private async statePath(
+  private async openJobDatabase(
     outputDir: PathInput,
     jobId: string | null,
-  ): Promise<string> {
+  ): Promise<OpenJobDatabase> {
     const destination = await canonicalPath(outputDir);
     await ensureOutputLayout(destination, false);
-    let selected: unknown = jobId;
-    if (selected === null) {
-      const pointerPath = join(destination, '.batch', 'current.json');
-      if (!(await managedFileExists(pointerPath))) {
-        throw new AgentJobsError(
-          'job_not_found',
-          `No current agent job exists in ${destination}`,
-        );
-      }
-      const pointer = await readJson(pointerPath);
-      selected = isObject(pointer) ? pointer.job_id : null;
+    const databasePath = databasePathFor(destination);
+    await ensureDatabaseStorage(databasePath, false);
+    const { client, close, db } = await openAgentJobsDatabase(databasePath);
+    try {
+      const selected = await resolveJobId(db, jobId);
+      return {
+        client,
+        close,
+        database: db,
+        databasePath,
+        destination,
+        jobId: selected,
+      };
+    } catch (error) {
+      close();
+      throw error;
     }
-    if (typeof selected !== 'string' || !JOB_ID_PATTERN.test(selected)) {
-      throw new AgentJobsError(
-        'invalid_job_id',
-        'Invalid job ID',
-      );
-    }
-    const path = join(
-      destination,
-      '.batch',
-      'jobs',
-      `${selected}.json`,
-    );
-    if (!(await managedFileExists(path))) {
-      throw new AgentJobsError(
-        'job_not_found',
-        `Agent job does not exist: ${selected}`,
-        { path },
-      );
-    }
-    return path;
   }
 
-  private async readState(path: string): Promise<AgentJobState> {
-    const value = await readJson(path);
-    if (!isObject(value) || value.state_version !== STATE_VERSION) {
-      throw new AgentJobsError(
-        'invalid_job',
-        'Agent job state is missing or incompatible',
-      );
-    }
-    if (!Array.isArray(value.records)) {
-      throw new AgentJobsError(
-        'invalid_job',
-        'Agent job items are invalid',
-      );
-    }
-    if (
-      value.session_status !== undefined
-      && value.session_status !== 'active'
-      && value.session_status !== 'superseded'
-    ) {
-      throw new AgentJobsError(
-        'invalid_job',
-        'Agent job session status is invalid',
-      );
-    }
-    return value as unknown as AgentJobState;
-  }
-
-  private async saveState(path: string, state: AgentJobState): Promise<void> {
-    state.updated_at = now();
-    await atomicWriteJson(path, state);
+  private async openHandleDatabase(handle: string): Promise<{
+    client: Client;
+    close: () => void;
+    database: AgentJobsDatabase;
+    databasePath: string;
+    registry: RegistryEntry;
+  }> {
+    const registry = await this.readRegistry(handle);
+    const databasePath = await registryDatabasePath(registry);
+    const { client, close, db } = await openAgentJobsDatabase(databasePath);
+    return { client, close, database: db, databasePath, registry };
   }
 
   private async newHandle(): Promise<string> {
@@ -1323,10 +1234,7 @@ export class AgentJobsRuntime {
 
   private registryPath(handle: string): string {
     if (typeof handle !== 'string' || !HANDLE_PATTERN.test(handle)) {
-      throw new AgentJobsError(
-        'invalid_handle',
-        'Assignment handle is invalid',
-      );
+      throw new AgentJobsError('invalid_handle', 'Assignment handle is invalid');
     }
     return join(this.registryDir, `${handle}.json`);
   }
@@ -1343,8 +1251,10 @@ export class AgentJobsRuntime {
     const value = await readJson(path);
     if (
       !isObject(value)
+      || value.state_version !== STATE_VERSION
       || value.handle !== handle
-      || typeof value.state_path !== 'string'
+      || typeof value.database_path !== 'string'
+      || typeof value.job_id !== 'string'
       || !Number.isInteger(value.record_index)
     ) {
       throw new AgentJobsError(
@@ -1354,198 +1264,245 @@ export class AgentJobsRuntime {
     }
     return value as unknown as RegistryEntry;
   }
+}
 
-  private async registryStatePath(registry: RegistryEntry): Promise<string> {
-    const statePath = registry.state_path;
-    const jobId = registry.job_id;
-    if (
-      !isAbsolute(statePath)
-      || typeof jobId !== 'string'
-      || !JOB_ID_PATTERN.test(jobId)
-      || basename(statePath) !== `${jobId}.json`
-      || basename(dirname(statePath)) !== 'jobs'
-      || basename(dirname(dirname(statePath))) !== '.batch'
-    ) {
-      throw new AgentJobsError(
-        'invalid_handle',
-        'Handle state path is invalid',
-      );
-    }
-    const destination = dirname(dirname(dirname(statePath)));
-    const expected = join(
-      destination,
-      '.batch',
-      'jobs',
-      `${jobId}.json`,
-    );
-    if (statePath !== expected) {
-      throw new AgentJobsError(
-        'invalid_handle',
-        'Handle state path is invalid',
-      );
-    }
-    await ensureOutputLayout(destination, false);
-    await ensureRealFile(statePath);
-    return statePath;
-  }
-
-  private async validateRunFile(
-    path: string,
-    schema: JsonSchema,
-  ): Promise<ValidationDiagnostic[]> {
-    await ensureRealFile(path);
-    try {
-      const value = await readJson(path);
-      return validationErrors(value, schema);
-    } catch (error) {
-      if (error instanceof AgentJobsError) {
-        return [{ path: '', message: error.message, validator: 'json' }];
-      }
-      throw error;
-    }
-  }
-
-  private async reconcileCommittedRuns(
-    state: AgentJobState,
-  ): Promise<boolean> {
-    let changed = false;
-    for (const record of state.records) {
-      if (
-        !ACTIVE_STATUSES.has(record.status)
-        && record.status !== 'pending'
-        && record.status !== 'failed'
-      ) {
-        continue;
-      }
-      const path = runPathFor(state, record);
-      if (!(await managedFileExists(path)))
-        continue;
-      const errors = await this.validateRunFile(
-        path,
-        state.spec.output_schema,
-      );
-      const wasFailed = record.status === 'failed';
-      // An invalid file cannot erase a durable terminal worker failure. A valid
-      // result, however, is the authoritative row outcome even when it arrived
-      // after failure bookkeeping.
-      if (wasFailed && errors.length > 0)
-        continue;
-      record.status = errors.length > 0 ? 'skipped_invalid' : 'completed';
-      record.cache_validation_errors = errors;
-      if (errors.length === 0) {
-        record.completed_at ??= now();
-        if (wasFailed)
-          record.last_error = null;
-        await safeUnlink(errorPathFor(state, record));
-      }
-      const handle = record.handle;
-      record.handle = null;
-      if (handle !== null)
-        await safeUnlink(this.registryPath(handle));
-      changed = true;
-    }
-    return changed;
-  }
-
-  private async buildValidationReport(
-    state: AgentJobState,
-  ): Promise<ValidationReport> {
-    const results: JsonObject[] = [];
+async function buildValidationSnapshot(
+  database: AgentJobsDatabase,
+  jobId: string,
+  databasePath: string,
+): Promise<ValidationSnapshot> {
+  return await database.transaction(async (transaction) => {
+    const job = parseJob(await requireJob(transaction, jobId));
+    assertActiveSession(job.row);
+    const rows = await transaction
+      .select({ record: jobRecords, result: results })
+      .from(jobRecords)
+      .leftJoin(results, eq(jobRecords.resultId, results.resultId))
+      .where(eq(jobRecords.jobId, jobId))
+      .orderBy(asc(jobRecords.inputIndex));
+    const validResults: JsonObject[] = [];
+    const collected: JsonObject[] = [];
     const errors: JsonObject[] = [];
     let invalid = 0;
     let missing = 0;
     let failed = 0;
-    for (const record of state.records) {
-      const path = runPathFor(state, record);
-      if (!(await managedFileExists(path))) {
+
+    for (const { record, result } of rows) {
+      const inputErrors = storedInputErrors(record, job.spec.input_schema);
+      if (inputErrors.length > 0) {
+        invalid += 1;
+        errors.push({
+          id: record.recordId,
+          code: 'invalid_stored_input',
+          errors: inputErrors,
+        });
+        continue;
+      }
+      if (result === null) {
         if (record.status === 'failed') {
           failed += 1;
           errors.push({
-            id: record.id,
+            id: record.recordId,
             code: 'worker_failed',
-            path: errorPathFor(state, record),
-            error: record.last_error,
+            error: record.lastErrorJson === null
+              ? null
+              : parseJsonObject(record.lastErrorJson, 'last error'),
           });
         } else {
           missing += 1;
           errors.push({
-            id: record.id,
+            id: record.recordId,
             code: 'missing_output',
             status: record.status,
-            path,
           });
         }
         continue;
       }
-      const rowErrors = await this.validateRunFile(
-        path,
-        state.spec.output_schema,
-      );
+      const rowErrors = [
+        ...storedResultIdentityErrors(result, record, job.row),
+        ...validateStoredResult(result, job.spec.output_schema),
+      ];
       if (rowErrors.length > 0) {
         invalid += 1;
         errors.push({
-          id: record.id,
+          id: record.recordId,
           code: 'invalid_output',
-          path,
+          result_id: result.resultId,
           errors: rowErrors,
         });
-      } else {
-        results.push({ id: record.id, path });
-      }
-    }
-    return {
-      job_id: state.job_id,
-      generated_at: now(),
-      valid: errors.length === 0,
-      counts: {
-        total: state.records.length,
-        valid: results.length,
-        invalid,
-        missing,
-        failed,
-      },
-      results,
-      errors,
-      on_error: state.settings.on_error,
-    };
-  }
-
-  private async validCollectedRecords(
-    state: AgentJobState,
-  ): Promise<JsonObject[]> {
-    const collected: JsonObject[] = [];
-    for (const record of state.records) {
-      const path = runPathFor(state, record);
-      if (!(await managedFileExists(path)))
-        continue;
-      await ensureRealFile(path);
-      const value = await readJson(path);
-      if (
-        !isObject(value)
-        || validationErrors(value, state.spec.output_schema).length > 0
-      ) {
         continue;
       }
+      const output = parseJsonObject(result.outputJson, 'stored result');
+      validResults.push({ id: record.recordId, result_id: result.resultId });
       const merged = Object.create(null) as JsonObject;
-      merged[state.id_column_key] = record.id;
-      for (const [key, item] of Object.entries(value)) {
-        if (key !== state.id_column_key)
-          merged[key] = item;
+      merged[job.row.idColumnKey] = record.recordId;
+      for (const [key, value] of Object.entries(output)) {
+        if (key !== job.row.idColumnKey)
+          merged[key] = value;
       }
       collected.push(merged);
     }
-    return collected;
+    return {
+      job,
+      report: {
+        job_id: job.row.jobId,
+        database: databasePath,
+        generated_at: now(),
+        valid: errors.length === 0,
+        counts: {
+          total: rows.length,
+          valid: validResults.length,
+          invalid,
+          missing,
+          failed,
+        },
+        results: validResults,
+        errors,
+        on_error: job.settings.on_error,
+      },
+      records: collected,
+    };
+  });
+}
+
+function validateStoredResult(
+  result: ResultRow,
+  schema: JsonSchema,
+): ValidationDiagnostic[] {
+  if (hashText(result.outputJson) !== result.outputHash) {
+    return [{
+      path: '',
+      message: 'stored result hash does not match its JSON payload',
+      validator: 'integrity',
+    }];
+  }
+  try {
+    return validationErrors(parseStrictJson(result.outputJson), schema);
+  } catch (error) {
+    return [{ path: '', message: errorMessage(error), validator: 'json' }];
   }
 }
 
-interface ValidationReport extends JsonObject {
-  job_id: string;
-  generated_at: string;
-  valid: boolean;
-  counts: JsonObject;
-  results: JsonObject[];
-  errors: JsonObject[];
-  on_error: OnError;
+async function resolveJobId(
+  database: AgentJobsDatabase,
+  requested: string | null,
+): Promise<string> {
+  let selected = requested;
+  if (selected === null) {
+    const [pointer] = await database.select().from(currentJob).limit(1);
+    if (pointer === undefined) {
+      throw new AgentJobsError('job_not_found', 'No current agent job exists');
+    }
+    selected = pointer.jobId;
+  }
+  if (!JOB_ID_PATTERN.test(selected))
+    throw new AgentJobsError('invalid_job_id', 'Invalid job ID');
+  const [job] = await database
+    .select({ jobId: jobs.jobId })
+    .from(jobs)
+    .where(eq(jobs.jobId, selected))
+    .limit(1);
+  if (job === undefined) {
+    throw new AgentJobsError(
+      'job_not_found',
+      `Agent job does not exist: ${selected}`,
+    );
+  }
+  return selected;
+}
+
+type SelectDatabase = Pick<AgentJobsDatabase, 'select'>;
+
+async function requireJob(
+  database: SelectDatabase,
+  jobId: string,
+): Promise<JobRow> {
+  const [job] = await database
+    .select()
+    .from(jobs)
+    .where(eq(jobs.jobId, jobId))
+    .limit(1);
+  if (job === undefined) {
+    throw new AgentJobsError('job_not_found', `Agent job does not exist: ${jobId}`);
+  }
+  return job;
+}
+
+async function requireHandleRecord(
+  database: SelectDatabase,
+  registry: RegistryEntry,
+  handle: string,
+): Promise<JobRecordRow> {
+  const [record] = await database
+    .select()
+    .from(jobRecords)
+    .where(and(
+      eq(jobRecords.jobId, registry.job_id),
+      eq(jobRecords.inputIndex, registry.record_index),
+      eq(jobRecords.leaseToken, handle),
+    ))
+    .limit(1);
+  if (record === undefined) {
+    throw new AgentJobsError('invalid_handle', 'Handle is no longer current');
+  }
+  return record;
+}
+
+function parseJob(row: JobRow): ParsedJob {
+  if (row.stateVersion !== STATE_VERSION) {
+    throw new AgentJobsError(
+      'invalid_job',
+      'Agent job state is missing or incompatible',
+    );
+  }
+  if (row.sessionStatus !== 'active' && row.sessionStatus !== 'superseded') {
+    throw new AgentJobsError('invalid_job', 'Agent job session status is invalid');
+  }
+  return {
+    row,
+    spec: parseJsonObject(row.specJson, 'job spec') as SerializedSpec,
+    settings: parseJsonObject(
+      row.settingsJson,
+      'job settings',
+    ) as unknown as ResolvedSettings,
+  };
+}
+
+function assertActiveSession(job: JobRow): void {
+  if (job.sessionStatus === 'active')
+    return;
+  throw new AgentJobsError(
+    'session_superseded',
+    'This agent job session was superseded by a newer run',
+    {
+      job_id: job.jobId,
+      superseded_by_job_id: job.supersededByJobId,
+    },
+  );
+}
+
+function countsFromStatuses(
+  records: ReadonlyArray<{ status: string }>,
+): QueueCounts {
+  const statuses = new Map<string, number>();
+  for (const record of records)
+    statuses.set(record.status, (statuses.get(record.status) ?? 0) + 1);
+  const leased = statuses.get('leased') ?? 0;
+  const running = statuses.get('running') ?? 0;
+  const skippedValid = statuses.get('skipped_valid') ?? 0;
+  const skippedInvalid = statuses.get('skipped_invalid') ?? 0;
+  return {
+    total: records.length,
+    pending: statuses.get('pending') ?? 0,
+    leased,
+    running,
+    active: leased + running,
+    completed: statuses.get('completed') ?? 0,
+    skipped: skippedValid + skippedInvalid,
+    skipped_valid: skippedValid,
+    skipped_invalid: skippedInvalid,
+    failed: statuses.get('failed') ?? 0,
+  };
 }
 
 function serializeSpec(spec: TaskSpec): SerializedSpec {
@@ -1564,91 +1521,113 @@ function schemaProperties(schema: JsonSchema): JsonObject {
   return isObject(schema.properties) ? schema.properties : {};
 }
 
-function recordForRegistry(
-  state: AgentJobState,
-  registry: RegistryEntry,
-  handle: string,
-): AgentJobItemRecord {
-  if (state.job_id !== registry.job_id) {
+function parseJsonObject(text: string, label: string): JsonObject {
+  try {
+    const value = parseStrictJson(text);
+    if (!isObject(value) || isPreciseNumber(value))
+      throw new TypeError(`${label} is not an object`);
+    return value;
+  } catch (error) {
     throw new AgentJobsError(
-      'invalid_handle',
-      'Handle agent job does not match',
+      'invalid_job',
+      `Could not parse ${label}: ${errorMessage(error)}`,
     );
   }
-  const index = registry.record_index;
-  if (index < 0 || index >= state.records.length) {
-    throw new AgentJobsError('invalid_handle', 'Handle row does not exist');
-  }
-  const record = state.records[index];
-  if (record === undefined || record.index !== index || record.handle !== handle) {
+}
+
+function parseStoredInput(
+  record: JobRecordRow,
+  schema: JsonSchema,
+): JsonObject {
+  const input = parseJsonObject(record.inputJson, 'record input');
+  const errors = storedInputErrors(record, schema, input);
+  if (errors.length > 0) {
     throw new AgentJobsError(
-      'invalid_handle',
-      'Handle is no longer current',
+      'invalid_job',
+      'Stored input failed integrity or schema validation',
+      errors,
     );
   }
-  return record;
+  return input;
 }
 
-function sessionStatus(state: AgentJobState): SessionStatus {
-  return state.session_status ?? 'active';
-}
-
-function assertActiveSession(state: AgentJobState): void {
-  if (sessionStatus(state) === 'active')
-    return;
-  throw new AgentJobsError(
-    'session_superseded',
-    'This agent job session was superseded by a newer run',
-    {
-      job_id: state.job_id,
-      superseded_by_job_id: state.superseded_by_job_id ?? null,
-    },
-  );
-}
-
-function counts(state: AgentJobState): QueueCounts {
-  const statuses = new Map<RecordStatus, number>();
-  for (const record of state.records) {
-    statuses.set(record.status, (statuses.get(record.status) ?? 0) + 1);
+function storedInputErrors(
+  record: JobRecordRow,
+  schema: JsonSchema,
+  parsed?: JsonObject,
+): ValidationDiagnostic[] {
+  try {
+    const input = parsed ?? parseJsonObject(record.inputJson, 'record input');
+    const errors = validationErrors(input, schema);
+    if (hashJson({ id: record.recordId, input }) !== record.inputHash) {
+      errors.unshift({
+        path: '',
+        message: 'stored input hash does not match its ID and JSON payload',
+        validator: 'integrity',
+      });
+    }
+    return errors;
+  } catch (error) {
+    return [{ path: '', message: errorMessage(error), validator: 'json' }];
   }
-  const leased = statuses.get('leased') ?? 0;
-  const running = statuses.get('running') ?? 0;
-  const skippedValid = statuses.get('skipped_valid') ?? 0;
-  const skippedInvalid = statuses.get('skipped_invalid') ?? 0;
-  return {
-    total: state.records.length,
-    pending: statuses.get('pending') ?? 0,
-    leased,
-    running,
-    active: leased + running,
-    completed: statuses.get('completed') ?? 0,
-    skipped: skippedValid + skippedInvalid,
-    skipped_valid: skippedValid,
-    skipped_invalid: skippedInvalid,
-    failed: statuses.get('failed') ?? 0,
-  };
 }
 
-function runPathFor(
-  state: AgentJobState,
-  record: AgentJobItemRecord,
-): string {
-  return join(state.output_dir, 'runs', `${record.safe_id}.json`);
+function storedResultIdentityErrors(
+  result: ResultRow,
+  record: JobRecordRow,
+  job: JobRow,
+): ValidationDiagnostic[] {
+  return result.recordId === record.recordId
+    && result.inputHash === record.inputHash
+    && result.executionHash === job.executionHash
+    ? []
+    : [{
+        path: '',
+        message: 'stored result identity does not match its job record',
+        validator: 'integrity',
+      }];
 }
 
-function errorPathFor(
-  state: AgentJobState,
-  record: AgentJobItemRecord,
-): string {
-  return join(state.output_dir, 'errors', `${record.safe_id}.json`);
+function hashJson(value: unknown): string {
+  return hashText(stringifyStrictJson(value, { sortKeys: true }));
 }
 
-function lockPath(statePath: string): string {
-  return `${statePath}.lock`;
+function hashText(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
 }
 
-function sessionLockPath(destination: string): string {
-  return join(destination, '.batch', 'session.lock');
+function cacheKey(recordId: string, inputHash: string): string {
+  return `${recordId.length}:${recordId}${inputHash}`;
+}
+
+function chunks<T>(values: T[], size: number): T[][] {
+  const result: T[][] = [];
+  for (let index = 0; index < values.length; index += size)
+    result.push(values.slice(index, index + size));
+  return result;
+}
+
+async function registryDatabasePath(registry: RegistryEntry): Promise<string> {
+  const path = registry.database_path;
+  if (
+    !isAbsolute(path)
+    || !JOB_ID_PATTERN.test(registry.job_id)
+    || basename(path) !== DATABASE_FILENAME
+    || basename(dirname(path)) !== '.batch'
+  ) {
+    throw new AgentJobsError('invalid_handle', 'Handle database path is invalid');
+  }
+  const destination = dirname(dirname(path));
+  if (path !== databasePathFor(destination)) {
+    throw new AgentJobsError('invalid_handle', 'Handle database path is invalid');
+  }
+  await ensureOutputLayout(destination, false);
+  await ensureDatabaseStorage(path, false);
+  return path;
+}
+
+function databasePathFor(destination: string): string {
+  return join(destination, '.batch', DATABASE_FILENAME);
 }
 
 async function writeCollection(
@@ -1660,20 +1639,16 @@ async function writeCollection(
   outputFieldOrder?: string[],
 ): Promise<void> {
   if (format === 'json') {
-    await atomicWriteText(
-      path,
-      `${stringifyStrictJson(records, { pretty: true })}\n`,
-    );
+    await atomicWriteText(path, `${stringifyStrictJson(records, { pretty: true })}\n`);
     return;
   }
   if (format === 'jsonl') {
-    const text = records
-      .map(record => `${stringifyStrictJson(record)}\n`)
-      .join('');
-    await atomicWriteText(path, text);
+    await atomicWriteText(
+      path,
+      records.map(record => `${stringifyStrictJson(record)}\n`).join(''),
+    );
     return;
   }
-
   const fields = [idKey];
   const declaredFields
     = outputFieldOrder ?? Object.keys(schemaProperties(outputSchema));
@@ -1689,15 +1664,9 @@ async function writeCollection(
   }
   const lines = [fields.map(csvCell).join(',')];
   for (const record of records) {
-    lines.push(
-      fields
-        .map(field =>
-          csvCell(
-            Object.hasOwn(record, field) ? csvValue(record[field]) : '',
-          ),
-        )
-        .join(','),
-    );
+    lines.push(fields.map(field => csvCell(
+      Object.hasOwn(record, field) ? csvValue(record[field]) : '',
+    )).join(','));
   }
   await atomicWriteText(path, `${lines.join('\r\n')}\r\n`);
 }
@@ -1707,9 +1676,8 @@ function csvValue(value: unknown): string | number | bigint {
     return '';
   if (typeof value === 'boolean')
     return value ? 'true' : 'false';
-  if (Array.isArray(value) || isObject(value)) {
+  if (Array.isArray(value) || isObject(value))
     return stringifyStrictJson(value);
-  }
   if (
     typeof value === 'string'
     || typeof value === 'number'
@@ -1730,35 +1698,21 @@ async function ensureOutputLayout(
   create: boolean,
 ): Promise<void> {
   await ensureRealDirectory(destination, create, create);
-  for (const relative of ['runs', 'errors', '.batch', '.batch/jobs']) {
-    await ensureRealDirectory(join(destination, relative), create, false);
-  }
+  await ensureRealDirectory(join(destination, '.batch'), create, false);
 }
 
-async function ensureStateOutputLayout(state: AgentJobState): Promise<void> {
-  if (typeof state.output_dir !== 'string' || state.output_dir.length === 0) {
+async function ensureDatabaseStorage(path: string, create: boolean): Promise<void> {
+  if (!create && !(await managedFileExists(path))) {
     throw new AgentJobsError(
-      'invalid_job',
-      'Agent job output_dir is missing or invalid',
+      'job_not_found',
+      `Agent job database does not exist: ${path}`,
+      { database: path },
     );
   }
-  if (!isAbsolute(state.output_dir)) {
-    throw new AgentJobsError(
-      'invalid_job',
-      'Agent job output_dir must be absolute',
-    );
+  for (const candidate of [path, `${path}-wal`, `${path}-shm`, `${path}-journal`]) {
+    if (await pathExists(candidate))
+      await ensureRealFile(candidate);
   }
-  await ensureOutputLayout(state.output_dir, false);
-}
-
-async function ensureArchiveDirectory(archiveRoot: string): Promise<void> {
-  const invalidDirectory = dirname(archiveRoot);
-  const historyDirectory = dirname(invalidDirectory);
-  const destination = dirname(historyDirectory);
-  await ensureOutputLayout(destination, false);
-  await ensureRealDirectory(historyDirectory, true, false);
-  await ensureRealDirectory(invalidDirectory, true, false);
-  await ensureRealDirectory(archiveRoot, true, false);
 }
 
 async function ensureRealDirectory(
@@ -1770,9 +1724,8 @@ async function ensureRealDirectory(
   try {
     metadata = await lstat(path);
   } catch (error) {
-    if (!isMissingFileError(error)) {
+    if (!isMissingFileError(error))
       throw unsafeInspectionError('directory', path, error);
-    }
     if (!create) {
       throw new AgentJobsError(
         'unsafe_output_path',
@@ -1797,7 +1750,6 @@ async function ensureRealDirectory(
       throw unsafeInspectionError('directory', path, inspectError);
     }
   }
-
   let reason: string | null = null;
   if (metadata.isSymbolicLink())
     reason = 'symlink';
@@ -1889,13 +1841,10 @@ function strictJsonProblem(value: unknown): string | null {
       return null;
     }
     if (typeof item === 'number') {
-      return Number.isFinite(item)
-        ? null
-        : `${path} contains a non-finite number`;
+      return Number.isFinite(item) ? null : `${path} contains a non-finite number`;
     }
-    if (typeof item !== 'object') {
+    if (typeof item !== 'object')
       return `${path} contains a non-JSON ${typeof item} value`;
-    }
     if (seen.has(item))
       return `${path} contains a cyclic value`;
     seen.add(item);
@@ -1907,12 +1856,10 @@ function strictJsonProblem(value: unknown): string | null {
       }
     } else {
       const prototype = Object.getPrototypeOf(item);
-      if (prototype !== Object.prototype && prototype !== null) {
+      if (prototype !== Object.prototype && prototype !== null)
         return `${path} contains a non-plain object`;
-      }
-      if (Object.getOwnPropertySymbols(item).length > 0) {
+      if (Object.getOwnPropertySymbols(item).length > 0)
         return `${path} contains a symbol-keyed property`;
-      }
       for (const [key, child] of Object.entries(item)) {
         const problem = visit(child, `${path}/${escapePointer(key)}`);
         if (problem !== null)
@@ -1936,20 +1883,15 @@ function strictJsonProblem(value: unknown): string | null {
 function absolutePath(input: PathInput): string {
   if (input instanceof URL)
     return resolve(fileURLToPath(input));
-  const expanded
-    = input === '~'
-      ? homedir()
-      : input.startsWith('~/')
-        ? join(homedir(), input.slice(2))
-        : input;
+  const expanded = input === '~'
+    ? homedir()
+    : input.startsWith('~/')
+      ? join(homedir(), input.slice(2))
+      : input;
   return resolve(expanded);
 }
 
-/**
- * Resolve every existing path component through the filesystem, then append any
- * not-yet-created suffix. This mirrors `Path.resolve()` semantics while still
- * allowing prepare to create a new OUTPUT_DIR beneath a symlinked ancestor.
- */
+/** Resolve existing path components without losing a symlinked parent. */
 async function canonicalPath(input: PathInput): Promise<string> {
   const candidate = unresolvedAbsolutePath(input);
   let cursor = candidate;
@@ -1980,28 +1922,120 @@ async function canonicalPath(input: PathInput): Promise<string> {
   }
 }
 
-/** Make a path absolute without collapsing `..` across a symlink boundary. */
 function unresolvedAbsolutePath(input: PathInput): string {
   if (input instanceof URL)
     return fileURLToPath(input);
-  const expanded
-    = input === '~'
-      ? homedir()
-      : input.startsWith('~/')
-        ? `${homedir()}${sep}${input.slice(2)}`
-        : input;
+  const expanded = input === '~'
+    ? homedir()
+    : input.startsWith('~/')
+      ? `${homedir()}${sep}${input.slice(2)}`
+      : input;
   return isAbsolute(expanded) ? expanded : `${process.cwd()}${sep}${expanded}`;
+}
+
+function installationCandidates(projectRoot: string, userHome: string): Record<
+  string,
+  Array<{ scope: string; paths: string[] }>
+> {
+  return {
+    codex: [
+      {
+        scope: 'project',
+        paths: [
+          join(projectRoot, 'AGENTS.md'),
+          join(projectRoot, '.codex', 'config.toml'),
+          join(projectRoot, '.codex', 'agents', 'agent_job_worker.toml'),
+          join(projectRoot, '.codex', 'agents', 'agent_job_postprocessor.toml'),
+          join(projectRoot, '.agents', 'skills', 'agent-jobs', 'SKILL.md'),
+          join(
+            projectRoot,
+            '.agents',
+            'skills',
+            'agent-jobs',
+            'scripts',
+            'agent-jobs.mjs',
+          ),
+        ],
+      },
+      {
+        scope: 'global',
+        paths: [
+          join(userHome, '.codex', 'AGENTS.md'),
+          join(userHome, '.codex', 'config.toml'),
+          join(userHome, '.codex', 'agents', 'agent_job_worker.toml'),
+          join(userHome, '.codex', 'agents', 'agent_job_postprocessor.toml'),
+          join(userHome, '.agents', 'skills', 'agent-jobs', 'SKILL.md'),
+          join(
+            userHome,
+            '.agents',
+            'skills',
+            'agent-jobs',
+            'scripts',
+            'agent-jobs.mjs',
+          ),
+        ],
+      },
+      {
+        scope: 'development',
+        paths: [
+          join(projectRoot, 'AGENTS.md'),
+          join(projectRoot, '.codex', 'config.toml'),
+          join(projectRoot, '.codex', 'agents', 'agent_job_worker.toml'),
+          join(projectRoot, '.codex', 'agents', 'agent_job_postprocessor.toml'),
+          join(projectRoot, '.agents', 'skills', 'agent-jobs', 'SKILL.md'),
+          join(projectRoot, 'dist', 'agent-jobs.mjs'),
+        ],
+      },
+    ],
+    claude: [
+      {
+        scope: 'project',
+        paths: [
+          join(projectRoot, 'CLAUDE.md'),
+          join(projectRoot, '.mcp.json'),
+          join(projectRoot, '.claude', 'settings.local.json'),
+          join(projectRoot, '.claude', 'agents', 'agent_job_worker.md'),
+          join(projectRoot, '.claude', 'agents', 'agent_job_postprocessor.md'),
+          join(projectRoot, '.claude', 'skills', 'agent-jobs', 'SKILL.md'),
+          join(
+            projectRoot,
+            '.claude',
+            'skills',
+            'agent-jobs',
+            'scripts',
+            'agent-jobs.mjs',
+          ),
+        ],
+      },
+      {
+        scope: 'global',
+        paths: [
+          join(userHome, '.claude', 'CLAUDE.md'),
+          join(userHome, '.claude.json'),
+          join(userHome, '.claude', 'settings.json'),
+          join(userHome, '.claude', 'agents', 'agent_job_worker.md'),
+          join(userHome, '.claude', 'agents', 'agent_job_postprocessor.md'),
+          join(userHome, '.claude', 'skills', 'agent-jobs', 'SKILL.md'),
+          join(
+            userHome,
+            '.claude',
+            'skills',
+            'agent-jobs',
+            'scripts',
+            'agent-jobs.mjs',
+          ),
+        ],
+      },
+    ],
+  };
+}
+
+function diagnostic(error: unknown): unknown {
+  return error instanceof AgentJobsError ? error.asDict() : errorMessage(error);
 }
 
 function now(): string {
   return new Date().toISOString();
-}
-
-function archiveStamp(date = new Date()): string {
-  return date
-    .toISOString()
-    .replaceAll('-', '')
-    .replaceAll(':', '');
 }
 
 function camelToSnake(value: string): string {
