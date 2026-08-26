@@ -3,6 +3,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import * as z from 'zod/v4';
 
 import { AgentJobsError } from './errors.js';
+import { isPreciseNumber, preciseNumberText } from './numbers.js';
 import { AgentJobsRuntime } from './state.js';
 import { parseStrictJson, stringifyStrictJson } from './storage.js';
 
@@ -199,6 +200,8 @@ export async function reportFailure(
 function jsonSafe(value: unknown): unknown {
   if (typeof value === 'bigint')
     return value.toString(10);
+  if (isPreciseNumber(value))
+    return preciseNumberText(value);
   if (Array.isArray(value))
     return value.map(jsonSafe);
   if (value !== null && typeof value === 'object') {

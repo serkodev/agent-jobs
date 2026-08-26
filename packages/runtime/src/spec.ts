@@ -11,6 +11,11 @@ import { Ajv2020 } from 'ajv/dist/2020.js';
 
 import { parseDocument } from 'yaml';
 import { AgentJobsError } from './errors.js';
+import {
+  isPreciseNumber,
+  preciseNumberText,
+  preserveYamlNumberPrecision,
+} from './numbers.js';
 import { readUtf8File, stringifyStrictJson } from './storage.js';
 
 export type JsonSchema = Record<string, unknown>;
@@ -230,7 +235,8 @@ export async function loadSpec(path: FilePath): Promise<TaskSpec> {
     : 1;
   if (
     typeof version === 'boolean'
-    || !['string', 'number', 'bigint'].includes(typeof version)
+    || (!['string', 'number', 'bigint'].includes(typeof version)
+      && !isPreciseNumber(version))
     || (typeof version === 'number' && !Number.isFinite(version))
   ) {
     throw new AgentJobsError(
@@ -321,6 +327,7 @@ function parseFrontmatter(text: string): {
   try {
     const document = parseDocument(lines.slice(1, closing).join('\n'), {
       intAsBigInt: true,
+      keepSourceTokens: true,
       prettyErrors: true,
       schema: 'core',
       strict: true,
@@ -330,6 +337,7 @@ function parseFrontmatter(text: string): {
     if (document.errors.length > 0) {
       throw new Error(document.errors.map(error => error.message).join('; '));
     }
+    preserveYamlNumberPrecision(document);
     const raw: unknown = document.toJS({ mapAsMap: true, maxAliasCount: 100 });
     metadata = normalizeYamlObject(raw);
   } catch (error) {
@@ -446,6 +454,8 @@ function normalizeInstanceForAjv(
 ): unknown {
   if (typeof value === 'bigint')
     return 0;
+  if (isPreciseNumber(value))
+    return exactNumberIsInteger(value) ? 0 : 0.5;
   if (typeof value === 'number') {
     if (!Number.isFinite(value))
       return value;
@@ -570,6 +580,8 @@ function normalizeSchemaLiteralForMeta(
       return numeric;
     return value < 0n ? -Number.MAX_SAFE_INTEGER : Number.MAX_SAFE_INTEGER;
   }
+  if (isPreciseNumber(value))
+    return exactNumberIsInteger(value) ? 0 : 0.5;
   if (typeof value === 'number') {
     if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
       throw new AgentJobsError(
@@ -763,6 +775,8 @@ function normalizeSchemaLiteral(
       return numeric;
     return value < 0n ? -Number.MAX_SAFE_INTEGER : Number.MAX_SAFE_INTEGER;
   }
+  if (isPreciseNumber(value))
+    return exactNumberIsInteger(value) ? 0 : 0.5;
   if (typeof value === 'number') {
     if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
       throw new AgentJobsError(
@@ -898,9 +912,16 @@ function schemaRational(value: unknown): Rational {
   return rational;
 }
 
+function exactNumberIsInteger(value: unknown): boolean {
+  const rational = numericRational(value);
+  return rational !== null && rational.numerator % rational.denominator === 0n;
+}
+
 function numericRational(value: unknown, schema = false): Rational | null {
   if (typeof value === 'bigint')
     return { numerator: value, denominator: 1n };
+  if (isPreciseNumber(value))
+    return rationalFromDecimal(preciseNumberText(value));
   if (typeof value !== 'number' || !Number.isFinite(value))
     return null;
   if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
@@ -921,6 +942,8 @@ function rationalFromDecimal(value: string): Rational {
     throw new Error(`Not a finite decimal number: ${value}`);
   const fraction = match[3] ?? '';
   const exponent = Number(match[4] ?? '0');
+  if (!Number.isSafeInteger(exponent) || Math.abs(exponent) > 100_000)
+    throw new Error(`Decimal exponent is too large: ${value}`);
   const digits = `${match[2]}${fraction}`;
   let numerator = BigInt(digits || '0');
   if (match[1] === '-')
@@ -1068,6 +1091,8 @@ function normalizeYamlObject(
       return Number(value);
     return value;
   }
+  if (isPreciseNumber(value))
+    return value;
   if (value === null || ['string', 'boolean'].includes(typeof value)) {
     return value;
   }

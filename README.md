@@ -73,6 +73,11 @@ A job needs three things:
 Agent Jobs accepts JSON, JSONL, CSV, and YAML. Each record must have a stable,
 unique string or integer ID.
 
+JSON and YAML numeric values are preserved without IEEE-754 rounding: safe values
+remain normal JavaScript numbers, integers beyond the safe range use `bigint`, and
+high-precision decimals/exponents use a lossless numeric representation throughout
+validation, worker delivery, persistence, and JSON/JSONL collection.
+
 `proposals.json`:
 
 ```json

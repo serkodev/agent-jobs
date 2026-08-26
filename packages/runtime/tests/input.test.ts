@@ -1,7 +1,8 @@
+import type { LosslessNumber } from '../src/numbers.js';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 
+import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { AgentJobsError } from '../src/errors.js';
@@ -11,6 +12,7 @@ import {
   resolveJsonPointer,
   safeIdFilename,
 } from '../src/input.js';
+import { isPreciseNumber, preciseNumberText } from '../src/numbers.js';
 
 const roots: string[] = [];
 
@@ -68,8 +70,7 @@ describe('input loaders', () => {
   it.each([
     '[{"id":"bad","score":NaN}]',
     '[{"id":"bad","score":Infinity}]',
-    '[{"id":"bad","score":1e400}]',
-  ])('rejects non-strict or non-finite JSON numbers', async (content) => {
+  ])('rejects non-JSON number syntax', async (content) => {
     const path = await temporaryFile('rows.json', content);
     await expect(loadRecords(path)).rejects.toMatchObject({ code: 'invalid_input' });
   });
@@ -119,6 +120,25 @@ describe('input loaders', () => {
     },
   );
 
+  it.each(['json', 'jsonl', 'yaml'])(
+    'preserves arbitrary-precision decimals and exponents (%s)',
+    async (format) => {
+      const json
+        = '[{"id":"exact","decimal":0.100000000000000000001,"huge":2.3e500}]';
+      const content = format === 'yaml'
+        ? '- id: exact\n  decimal: 0.100000000000000000001\n  huge: 2.3e500\n'
+        : format === 'jsonl' ? json.slice(1, -1) : json;
+      const path = await temporaryFile(`rows.${format}`, content);
+      const [record] = await loadRecords(path);
+      expect(isPreciseNumber(record!.decimal)).toBe(true);
+      expect(isPreciseNumber(record!.huge)).toBe(true);
+      expect(preciseNumberText(record!.decimal as LosslessNumber)).toBe(
+        '0.100000000000000000001',
+      );
+      expect(preciseNumberText(record!.huge as LosslessNumber)).toBe('2.3e500');
+    },
+  );
+
   it('preserves a literal YAML __proto__ field without prototype pollution', async () => {
     const path = await temporaryFile(
       'rows.yaml',
@@ -150,9 +170,13 @@ describe('input loaders', () => {
     '[{"id":1.0000000000000001}]',
     '[{"id":9.007199254740993e15}]',
     '[{"id":1e-400}]',
-  ])('rejects a decimal/exponent ID literal that Number would change', async (content) => {
+  ])('preserves an inexact decimal ID before ID validation rejects it', async (content) => {
     const path = await temporaryFile('rows.json', content);
-    await expect(loadRecords(path)).rejects.toMatchObject({ code: 'invalid_input' });
+    const [record] = await loadRecords(path);
+    expect(isPreciseNumber(record!.id)).toBe(true);
+    expect(() => canonicalizeId(record!.id)).toThrowError(
+      expect.objectContaining({ code: 'invalid_id' }),
+    );
   });
 
   it.each(['json', 'yaml'])('selects nested records using JSON Pointer (%s)', async (format) => {

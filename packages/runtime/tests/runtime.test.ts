@@ -18,6 +18,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { stringify as stringifyYaml } from 'yaml';
 import { AgentJobsError } from '../src/errors.js';
 import { safeIdFilename } from '../src/input.js';
+import { isPreciseNumber } from '../src/numbers.js';
 import { AgentJobsRuntime } from '../src/state.js';
 import {
   atomicWriteJson,
@@ -287,6 +288,44 @@ describe('agentJobsRuntime', () => {
     await expect(
       context.runtime.getAssignment(lease!.handle),
     ).rejects.toMatchObject({ code: 'handle_consumed' });
+  });
+
+  it('roundtrips precise decimals through assignment, result, and collection', async () => {
+    const context = await fixture({
+      rawInput:
+        '[{"id":"exact","value":0.100000000000000000001}]\n',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          value: { type: 'number' },
+        },
+        required: ['id', 'value'],
+        additionalProperties: false,
+      },
+      outputSchema: {
+        type: 'object',
+        properties: { value: { type: 'number' } },
+        required: ['value'],
+        additionalProperties: false,
+      },
+    });
+    const prepared = await prepare(context);
+    const [lease] = await nextLeases(context, prepared.job_id);
+    const assignment = await context.runtime.getAssignment(lease!.handle);
+    expect(isPreciseNumber((assignment.input as Record<string, unknown>).value)).toBe(
+      true,
+    );
+    const output = parseStrictJson('{"value":2.300000000000000000001e500}');
+    await context.runtime.submitResult(lease!.handle, output);
+    const collected = await context.runtime.collect(
+      context.outputDir,
+      prepared.job_id,
+      { format: 'json' },
+    );
+    expect(await readFile(collected.path as string, 'utf8')).toContain(
+      '2.300000000000000000001e500',
+    );
   });
 
   it('canonicalizes a symlinked OUTPUT_DIR ancestor before persisting state', async () => {

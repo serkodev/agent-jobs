@@ -1,5 +1,6 @@
 /** Durable filesystem primitives and strict, bigint-safe JSON helpers. */
 import type { Stats } from 'node:fs';
+import type { IntegerRepresentation } from './numbers.js';
 import { randomUUID } from 'node:crypto';
 import {
   link,
@@ -13,16 +14,24 @@ import {
 import { hostname } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import process from 'node:process';
-import { fileURLToPath } from 'node:url';
 
-import { JSONParse, JSONStringify } from 'json-with-bigint';
+import { fileURLToPath } from 'node:url';
+import { JSONParse } from 'json-with-bigint';
+import { stringify as stringifyLosslessJson } from 'lossless-json';
 
 import { AgentJobsError } from './errors.js';
+import {
+  isPreciseNumber,
+  parseJsonNumber,
+} from './numbers.js';
 
 export type FilePath = string | URL;
 export interface StrictJsonStringifyOptions {
   pretty?: boolean;
   sortKeys?: boolean;
+}
+export interface StrictJsonParseOptions {
+  integers?: IntegerRepresentation;
 }
 export interface AtomicWriteOptions {
   noClobber?: boolean;
@@ -45,24 +54,29 @@ interface LockIdentity {
 
 const DEFAULT_LOCK_TIMEOUT_MS = 30_000;
 
-/** Parse strict JSON while retaining unsafe integer literals as native bigint. */
-export function parseStrictJson(text: string): unknown {
-  assertNoLossyIntegerLikeNumbers(text);
-  const value: unknown = JSONParse(text);
-  assertFiniteNumbers(value);
-  return value;
+/** Parse strict JSON while retaining every numeric literal without precision loss. */
+export function parseStrictJson(
+  text: string,
+  options: StrictJsonParseOptions = {},
+): unknown {
+  const { rewritten, tokens } = replaceJsonNumbersWithTokens(text);
+  return reviveJsonNumbers(
+    JSONParse(rewritten),
+    tokens,
+    options.integers ?? 'safe-number',
+  );
 }
 
-/** Encode strict JSON, including bigint values as unquoted decimal literals. */
+/** Encode strict JSON, including bigint and precise decimal numeric literals. */
 export function stringifyStrictJson(
   value: unknown,
   options: StrictJsonStringifyOptions = {},
 ): string {
   assertStrictJsonValue(value);
   const serializable = options.sortKeys ? sortObjectKeys(value) : value;
-  const rendered = JSONStringify(
+  const rendered = stringifyLosslessJson(
     serializable,
-    undefined,
+    null,
     options.pretty ? 2 : undefined,
   );
   if (rendered === undefined) {
@@ -340,25 +354,6 @@ async function fsyncDirectory(directory: string): Promise<void> {
   }
 }
 
-function assertFiniteNumbers(value: unknown, seen = new WeakSet<object>()): void {
-  if (typeof value === 'number' && !Number.isFinite(value)) {
-    throw new SyntaxError('non-finite JSON number is not allowed');
-  }
-  if (value === null || typeof value !== 'object') {
-    return;
-  }
-  if (seen.has(value)) {
-    throw new SyntaxError('cyclic JSON value is not allowed');
-  }
-  seen.add(value);
-  if (Array.isArray(value)) {
-    for (const item of value) assertFiniteNumbers(item, seen);
-  } else {
-    for (const item of Object.values(value)) assertFiniteNumbers(item, seen);
-  }
-  seen.delete(value);
-}
-
 function assertStrictJsonValue(value: unknown, seen = new WeakSet<object>()): void {
   if (
     value === null
@@ -374,6 +369,8 @@ function assertStrictJsonValue(value: unknown, seen = new WeakSet<object>()): vo
     }
     return;
   }
+  if (isPreciseNumber(value))
+    return;
   if (typeof value !== 'object') {
     throw new TypeError(`unsupported JSON value type: ${typeof value}`);
   }
@@ -394,6 +391,8 @@ function assertStrictJsonValue(value: unknown, seen = new WeakSet<object>()): vo
 }
 
 function sortObjectKeys(value: unknown): unknown {
+  if (isPreciseNumber(value))
+    return value;
   if (Array.isArray(value)) {
     return value.map(sortObjectKeys);
   }
@@ -850,17 +849,24 @@ function lineAndColumn(text: string, position: number): { line: number; column: 
   return { line: lines.length, column: (lines.at(-1)?.length ?? 0) + 1 };
 }
 
-/**
- * json-with-bigint retains plain integer tokens, but decimal/exponent tokens
- * still pass through Number. Reject only those tokens whose exact value would
- * be silently changed into a different integer (or an unsafe integer).
- */
-function assertNoLossyIntegerLikeNumbers(text: string): void {
+function replaceJsonNumbersWithTokens(text: string): {
+  rewritten: string;
+  tokens: ReadonlyMap<string, string>;
+} {
+  let prefix: string;
+  do {
+    prefix = `__agent_jobs_number_${randomUUID()}_`;
+  } while (text.includes(prefix));
+  const tokens = new Map<string, string>();
+  let rewritten = '';
   let index = 0;
+  let tokenIndex = 0;
   while (index < text.length) {
     const character = text[index];
     if (character === '"') {
-      index = skipJsonString(text, index);
+      const end = skipJsonString(text, index);
+      rewritten += text.slice(index, end);
+      index = end;
       continue;
     }
     if (character === '-' || (character !== undefined && /\d/.test(character))) {
@@ -868,15 +874,18 @@ function assertNoLossyIntegerLikeNumbers(text: string): void {
         text.slice(index),
       );
       if (match) {
-        const token = match[0];
-        if (/[.e]/i.test(token))
-          assertLosslessDecimalToken(token);
-        index += token.length;
+        const marker = `${prefix}${tokenIndex}`;
+        tokenIndex += 1;
+        tokens.set(marker, match[0]);
+        rewritten += JSON.stringify(marker);
+        index += match[0].length;
         continue;
       }
     }
+    rewritten += character;
     index += 1;
   }
+  return { rewritten, tokens };
 }
 
 function skipJsonString(text: string, openingQuote: number): number {
@@ -893,49 +902,24 @@ function skipJsonString(text: string, openingQuote: number): number {
   return index;
 }
 
-function assertLosslessDecimalToken(token: string): void {
-  const exact = decimalRational(token);
-  const rendered = Number(token);
-  if (!Number.isFinite(rendered)) {
-    throw new SyntaxError(
-      `Non-finite JSON number cannot be represented losslessly: ${token}`,
+function reviveJsonNumbers(
+  value: unknown,
+  tokens: ReadonlyMap<string, string>,
+  integers: IntegerRepresentation,
+): unknown {
+  if (typeof value === 'string') {
+    const token = tokens.get(value);
+    return token === undefined ? value : parseJsonNumber(token, integers);
+  }
+  if (Array.isArray(value))
+    return value.map(item => reviveJsonNumbers(item, tokens, integers));
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        key,
+        reviveJsonNumbers(item, tokens, integers),
+      ]),
     );
   }
-  const exactInteger = exact.numerator % exact.denominator === 0n;
-  if (exactInteger) {
-    const integer = exact.numerator / exact.denominator;
-    if (
-      integer < BigInt(Number.MIN_SAFE_INTEGER)
-      || integer > BigInt(Number.MAX_SAFE_INTEGER)
-    ) {
-      throw new SyntaxError(`JSON integer cannot be represented losslessly: ${token}`);
-    }
-    return;
-  }
-  if (Number.isInteger(rendered)) {
-    throw new SyntaxError(
-      `JSON number would be rounded to a different integer: ${token}`,
-    );
-  }
-}
-
-function decimalRational(token: string): { numerator: bigint; denominator: bigint } {
-  const match = /^(-?)(\d+)(?:\.(\d+))?(?:e([+-]?\d+))?$/i.exec(token);
-  if (!match)
-    throw new SyntaxError(`Invalid JSON number: ${token}`);
-  const fraction = match[3] ?? '';
-  const exponentText = match[4] ?? '0';
-  const exponent = Number(exponentText);
-  if (!Number.isSafeInteger(exponent) || Math.abs(exponent) > 100_000) {
-    throw new SyntaxError(`JSON number exponent is too large: ${token}`);
-  }
-  const digits = `${match[2]}${fraction}`;
-  let numerator = BigInt(digits || '0');
-  if (match[1] === '-')
-    numerator = -numerator;
-  const scale = fraction.length - exponent;
-  if (scale <= 0) {
-    return { numerator: numerator * 10n ** BigInt(-scale), denominator: 1n };
-  }
-  return { numerator, denominator: 10n ** BigInt(scale) };
+  return value;
 }

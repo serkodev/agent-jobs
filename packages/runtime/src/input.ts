@@ -1,7 +1,7 @@
 import type { FilePath } from './storage.js';
 /** Input loading, RFC 6901 traversal, and deterministic row ID handling. */
 import { Buffer } from 'node:buffer';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { extname, resolve } from 'node:path';
@@ -11,6 +11,10 @@ import { parse as parseCsv } from 'csv-parse/sync';
 
 import { parseDocument } from 'yaml';
 import { AgentJobsError } from './errors.js';
+import {
+  isPreciseNumber,
+  preserveYamlNumberPrecision,
+} from './numbers.js';
 import { parseStrictJson, readUtf8File } from './storage.js';
 
 export type InputRecord = Record<string, unknown>;
@@ -38,7 +42,7 @@ export async function loadRecords(
   let data: unknown;
   try {
     if (suffix === '.json') {
-      data = parseInputJson(await readUtf8File(source));
+      data = parseStrictJson(await readUtf8File(source), { integers: 'bigint' });
     } else if (suffix === '.jsonl' || suffix === '.ndjson') {
       rejectRecordsPath(recordsPath, 'JSONL');
       data = await loadJsonl(source);
@@ -186,7 +190,7 @@ async function loadJsonl(path: string): Promise<unknown[]> {
     if (line.trim().length === 0)
       continue;
     try {
-      values.push(parseInputJson(line));
+      values.push(parseStrictJson(line, { integers: 'bigint' }));
     } catch (error) {
       throw new AgentJobsError(
         'invalid_input',
@@ -235,6 +239,7 @@ async function loadCsv(path: string): Promise<InputRecord[]> {
 function parseYaml(text: string): unknown {
   const document = parseDocument(text, {
     intAsBigInt: true,
+    keepSourceTokens: true,
     prettyErrors: true,
     schema: 'core',
     strict: true,
@@ -244,12 +249,13 @@ function parseYaml(text: string): unknown {
   if (document.errors.length > 0) {
     throw new Error(document.errors.map(error => error.message).join('; '));
   }
+  preserveYamlNumberPrecision(document);
   const value: unknown = document.toJS({ mapAsMap: true, maxAliasCount: 100 });
   return normalizeYamlValue(value);
 }
 
 function normalizeYamlValue(value: unknown, seen = new WeakSet<object>()): unknown {
-  if (typeof value === 'bigint') {
+  if (typeof value === 'bigint' || isPreciseNumber(value)) {
     return value;
   }
   if (value === null || ['string', 'boolean', 'number'].includes(typeof value)) {
@@ -316,84 +322,6 @@ function isRecord(value: unknown): value is InputRecord {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function parseInputJson(text: string): unknown {
-  // Validate the original document, including strict finite/lossy-number guards.
-  parseStrictJson(text);
-  let prefix: string;
-  do {
-    prefix = `__batch_input_number_${randomUUID()}_`;
-  } while (text.includes(prefix));
-  const tokens = new Map<string, string>();
-  let rewritten = '';
-  let index = 0;
-  let tokenIndex = 0;
-  while (index < text.length) {
-    if (text[index] === '"') {
-      const end = jsonStringEnd(text, index);
-      rewritten += text.slice(index, end);
-      index = end;
-      continue;
-    }
-    const character = text[index];
-    if (character === '-' || (character !== undefined && /\d/.test(character))) {
-      const match = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:e[+-]?\d+)?/i.exec(
-        text.slice(index),
-      );
-      if (match) {
-        const marker = `${prefix}${tokenIndex}`;
-        tokenIndex += 1;
-        tokens.set(marker, match[0]);
-        rewritten += JSON.stringify(marker);
-        index += match[0].length;
-        continue;
-      }
-    }
-    rewritten += character;
-    index += 1;
-  }
-  return reviveInputNumbers(parseStrictJson(rewritten), tokens);
-}
-
-function reviveInputNumbers(value: unknown, tokens: ReadonlyMap<string, string>): unknown {
-  if (typeof value === 'string') {
-    const token = tokens.get(value);
-    if (token === undefined)
-      return value;
-    if (!/[.e]/i.test(token))
-      return BigInt(token);
-    const numeric = Number(token);
-    if (!Number.isFinite(numeric))
-      throw new Error(`non-finite input number: ${token}`);
-    return numeric;
-  }
-  if (Array.isArray(value)) {
-    return value.map(item => reviveInputNumbers(item, tokens));
-  }
-  if (isRecord(value)) {
-    return safeObjectEntries(
-      Object.entries(value).map(([key, item]) => [
-        key,
-        reviveInputNumbers(item, tokens),
-      ]),
-    );
-  }
-  return value;
-}
-
-function jsonStringEnd(text: string, openingQuote: number): number {
-  let index = openingQuote + 1;
-  while (index < text.length) {
-    if (text[index] === '\\') {
-      index += 2;
-      continue;
-    }
-    if (text[index] === '"')
-      return index + 1;
-    index += 1;
-  }
-  return index;
 }
 
 function safeObjectEntries(entries: Iterable<readonly [string, unknown]>): InputRecord {

@@ -1,5 +1,6 @@
 import type { Buffer } from 'node:buffer';
 import type { ChildProcess } from 'node:child_process';
+import type { LosslessNumber } from '../src/numbers.js';
 import { spawn } from 'node:child_process';
 import {
   lstat,
@@ -11,11 +12,12 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { hostname, tmpdir } from 'node:os';
-import { join } from 'node:path';
 
+import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { AgentJobsError } from '../src/errors.js';
+import { isPreciseNumber, preciseNumberText } from '../src/numbers.js';
 import {
   atomicMove,
   atomicWriteJson,
@@ -39,7 +41,7 @@ async function temporaryRoot(): Promise<string> {
   return root;
 }
 
-describe('strict bigint-safe JSON', () => {
+describe('strict lossless JSON', () => {
   it('roundtrips unsafe integers as unquoted numeric literals', () => {
     const text = stringifyStrictJson({ exact: 9223372036854775807n });
     expect(text).toBe('{"exact":9223372036854775807}');
@@ -57,6 +59,18 @@ describe('strict bigint-safe JSON', () => {
     );
   });
 
+  it('roundtrips arbitrary-precision decimals and exponent values', () => {
+    const text = '{"decimal":0.100000000000000000001,"huge":2.3e500}';
+    const parsed = parseStrictJson(text) as Record<string, unknown>;
+    expect(isPreciseNumber(parsed.decimal)).toBe(true);
+    expect(isPreciseNumber(parsed.huge)).toBe(true);
+    expect(preciseNumberText(parsed.decimal as LosslessNumber)).toBe(
+      '0.100000000000000000001',
+    );
+    expect(preciseNumberText(parsed.huge as LosslessNumber)).toBe('2.3e500');
+    expect(stringifyStrictJson(parsed)).toBe(text);
+  });
+
   it.each([Number.NaN, Number.POSITIVE_INFINITY, undefined, () => true, new Date()])(
     'rejects non-strict value %s',
     (value) => {
@@ -64,11 +78,11 @@ describe('strict bigint-safe JSON', () => {
     },
   );
 
-  it('rejects cycles and non-finite parsed numbers', () => {
+  it('rejects cycles and non-JSON number syntax', () => {
     const cyclic: Record<string, unknown> = {};
     cyclic.self = cyclic;
     expect(() => stringifyStrictJson(cyclic)).toThrow(/cyclic/i);
-    expect(() => parseStrictJson('1e400')).toThrow(/finite/i);
+    expect(() => parseStrictJson('NaN')).toThrow();
   });
 });
 
@@ -84,7 +98,7 @@ describe('jSON file storage', () => {
     expect((await lstat(path)).mode & 0o777).toBe(0o600);
   });
 
-  it('maps missing, malformed, non-finite, and invalid UTF-8 JSON to stable errors', async () => {
+  it('maps missing, malformed, and invalid UTF-8 JSON to stable errors', async () => {
     const root = await temporaryRoot();
     await expect(readJson(join(root, 'missing.json'))).rejects.toMatchObject({
       code: 'storage_not_found',
@@ -96,10 +110,6 @@ describe('jSON file storage', () => {
       code: 'invalid_json',
       details: expect.objectContaining({ path: malformed }),
     });
-
-    const nonfinite = join(root, 'nonfinite.json');
-    await writeFile(nonfinite, '1e400', 'utf8');
-    await expect(readJson(nonfinite)).rejects.toMatchObject({ code: 'invalid_json' });
 
     const invalidUtf8 = join(root, 'invalid-utf8.json');
     await writeFile(invalidUtf8, new Uint8Array([0x5B, 0xFF, 0x5D]));

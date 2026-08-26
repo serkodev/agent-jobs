@@ -11,6 +11,7 @@ import {
   loadSpec,
   validationErrors,
 } from '../src/spec.js';
+import { parseStrictJson, stringifyStrictJson } from '../src/storage.js';
 
 const roots: string[] = [];
 
@@ -122,6 +123,34 @@ describe('task specification loading', () => {
   it('preserves large YAML integer metadata exactly', async () => {
     const spec = await loadSpec(await writeSpec({ extra: { version: 9223372036854775807n } }));
     expect(spec.version).toBe('9223372036854775807');
+  });
+
+  it('preserves arbitrary-precision YAML schema numbers exactly', async () => {
+    const path = await rawSpec(`---
+name: precise-schema
+input_schema:
+  type: object
+  properties:
+    score:
+      type: number
+      minimum: 0.100000000000000000001
+  required: [score]
+output_schema:
+  type: object
+  properties: {}
+---
+Validate the score.
+`);
+    const spec = await loadSpec(path);
+    const score = (spec.inputSchema.properties as Record<string, JsonSchema>)
+      .score!;
+    expect(stringifyStrictJson(score.minimum)).toBe('0.100000000000000000001');
+    expect(
+      validationErrors(
+        { score: parseStrictJson('0.100000000000000000000') },
+        spec.inputSchema,
+      ),
+    ).toEqual([expect.objectContaining({ path: '/score', validator: 'minimum' })]);
   });
 
   it('rejects missing, unclosed, non-object, and empty frontmatter/body', async () => {
@@ -336,6 +365,33 @@ describe('jSON Schema validation', () => {
       validationErrors(9007199254740993n, { multipleOf: 2n }),
     ).toEqual([expect.objectContaining({ validator: 'multipleOf' })]);
     expect(validationErrors(9007199254740994n, { multipleOf: 2n })).toEqual([]);
+  });
+
+  it('validates arbitrary-precision decimals without Number rounding', () => {
+    const below = parseStrictJson('0.100000000000000000000');
+    const exact = parseStrictJson('0.100000000000000000001');
+    const above = parseStrictJson('0.100000000000000000002');
+    const schema = {
+      type: 'number',
+      minimum: exact,
+      maximum: exact,
+      multipleOf: exact,
+    } satisfies JsonSchema;
+
+    expect(validationErrors(exact, schema)).toEqual([]);
+    expect(validationErrors(below, schema)).toEqual([
+      expect.objectContaining({ validator: 'minimum' }),
+      expect.objectContaining({ validator: 'multipleOf' }),
+    ]);
+    expect(validationErrors(above, schema)).toEqual([
+      expect.objectContaining({ validator: 'maximum' }),
+      expect.objectContaining({ validator: 'multipleOf' }),
+    ]);
+    expect(
+      validationErrors(parseStrictJson('9007199254740993.0'), {
+        type: 'integer',
+      }),
+    ).toEqual([]);
   });
 
   it('preserves exact bigint semantics through local refs and combinators', () => {

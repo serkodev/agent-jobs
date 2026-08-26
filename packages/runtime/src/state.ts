@@ -21,6 +21,7 @@ import {
   loadRecords,
   safeIdFilename,
 } from './input.js';
+import { isPreciseNumber } from './numbers.js';
 import {
   loadSpec,
 
@@ -1877,6 +1878,8 @@ function unsafeInspectionError(
 function strictJsonProblem(value: unknown): string | null {
   const seen = new Set<object>();
   const visit = (item: unknown, path: string): string | null => {
+    if (isPreciseNumber(item))
+      return null;
     if (
       item === null
       || typeof item === 'string'
