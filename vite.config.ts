@@ -8,8 +8,8 @@ import packageMetadata from './package.json' with { type: 'json' };
 const nodeBuiltins = new Set([
   ...builtinModules,
   ...builtinModules.map(name => `node:${name}`),
+  'node:sqlite',
 ]);
-const runtimeDependencies = new Set(['@libsql/client/sqlite3']);
 
 export default defineConfig({
   define: {
@@ -20,7 +20,7 @@ export default defineConfig({
     mainFields: ['module', 'main'],
   },
   build: {
-    target: 'node20',
+    target: 'node22',
     outDir: 'dist',
     emptyOutDir: true,
     minify: false,
@@ -33,7 +33,7 @@ export default defineConfig({
     },
     rolldownOptions: {
       platform: 'node',
-      external: id => nodeBuiltins.has(id) || runtimeDependencies.has(id),
+      external: id => nodeBuiltins.has(id),
       output: {
         codeSplitting: false,
       },

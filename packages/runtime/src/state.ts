@@ -1,6 +1,6 @@
 /** SQLite-backed batch queue and capability-based worker protocol. */
 
-import type { Client } from '@libsql/client';
+import type { DatabaseSync } from 'node:sqlite';
 import type { AgentJobsDatabase } from './database.js';
 import type { TaskSpec, ValidationDiagnostic } from './spec.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -12,7 +12,11 @@ import { fileURLToPath } from 'node:url';
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 
 import { currentJob, jobRecords, jobs, results } from './database-schema.js';
-import { openAgentJobsDatabase, writeTransaction } from './database.js';
+import {
+  openAgentJobsDatabase,
+  readTransaction,
+  writeTransaction,
+} from './database.js';
 import { AgentJobsError } from './errors.js';
 import { canonicalizeId, loadRecords } from './input.js';
 import { isPreciseNumber } from './numbers.js';
@@ -173,9 +177,8 @@ export interface QueueCounts extends JsonObject {
 }
 
 interface OpenJobDatabase {
-  client: Client;
+  client: DatabaseSync;
   close: () => void;
-  database: AgentJobsDatabase;
   databasePath: string;
   destination: string;
   jobId: string;
@@ -778,7 +781,7 @@ export class AgentJobsRuntime {
   ): Promise<JsonObject> {
     const opened = await this.openJobDatabase(outputDir, jobId);
     try {
-      return await opened.database.transaction(async (transaction) => {
+      return await readTransaction(opened.client, async (transaction) => {
         const job = parseJob(await requireJob(transaction, opened.jobId));
         const records = await transaction
           .select()
@@ -824,7 +827,7 @@ export class AgentJobsRuntime {
     const opened = await this.openJobDatabase(outputDir, jobId);
     try {
       const snapshot = await buildValidationSnapshot(
-        opened.database,
+        opened.client,
         opened.jobId,
         opened.databasePath,
       );
@@ -847,7 +850,7 @@ export class AgentJobsRuntime {
     const opened = await this.openJobDatabase(outputDir, jobId);
     try {
       const snapshot = await buildValidationSnapshot(
-        opened.database,
+        opened.client,
         opened.jobId,
         opened.databasePath,
       );
@@ -919,8 +922,8 @@ export class AgentJobsRuntime {
     const minor = Number.parseInt(minorText, 10);
     checks.push({
       name: 'node',
-      ok: major > 20 || (major === 20 && minor >= 6),
-      detail: { version: nodeVersion, required: '>=20.6' },
+      ok: major > 22 || (major === 22 && minor >= 13),
+      detail: { version: nodeVersion, required: '>=22.13' },
     });
 
     const installation: Record<string, unknown> = {};
@@ -1199,7 +1202,6 @@ export class AgentJobsRuntime {
       return {
         client,
         close,
-        database: db,
         databasePath,
         destination,
         jobId: selected,
@@ -1211,16 +1213,15 @@ export class AgentJobsRuntime {
   }
 
   private async openHandleDatabase(handle: string): Promise<{
-    client: Client;
+    client: DatabaseSync;
     close: () => void;
-    database: AgentJobsDatabase;
     databasePath: string;
     registry: RegistryEntry;
   }> {
     const registry = await this.readRegistry(handle);
     const databasePath = await registryDatabasePath(registry);
-    const { client, close, db } = await openAgentJobsDatabase(databasePath);
-    return { client, close, database: db, databasePath, registry };
+    const { client, close } = await openAgentJobsDatabase(databasePath);
+    return { client, close, databasePath, registry };
   }
 
   private async newHandle(): Promise<string> {
@@ -1267,11 +1268,11 @@ export class AgentJobsRuntime {
 }
 
 async function buildValidationSnapshot(
-  database: AgentJobsDatabase,
+  client: DatabaseSync,
   jobId: string,
   databasePath: string,
 ): Promise<ValidationSnapshot> {
-  return await database.transaction(async (transaction) => {
+  return await readTransaction(client, async (transaction) => {
     const job = parseJob(await requireJob(transaction, jobId));
     assertActiveSession(job.row);
     const rows = await transaction

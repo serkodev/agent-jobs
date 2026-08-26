@@ -21,7 +21,7 @@ Key benefits:
 
 ## Install
 
-Agent Jobs requires Node.js 20.6 or later. The recommended command for a registry
+Agent Jobs requires Node.js 22.13 or later. The recommended command for a registry
 release is:
 
 ```bash

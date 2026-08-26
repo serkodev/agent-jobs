@@ -5,10 +5,10 @@ belong in [README.md](README.md).
 
 ## Requirements
 
-- Node.js 20.19+ or 22.12+ for the Vite 8 build toolchain
+- Node.js 22.13+ (the first Node 22 release where `node:sqlite` needs no flag)
 - pnpm 11.19.0, as declared by `packageManager`
 
-The generated CLI targets Node.js 20 and supports Node.js 20.6 or later at runtime.
+The generated CLI targets Node.js 22 and supports Node.js 22.13 or later at runtime.
 
 ## Set up the repository
 
@@ -89,8 +89,9 @@ tools:
 `prepare` validates the input, task spec, IDs, and schemas before workers start.
 Each assignment uses an opaque capability handle, and `submit_result` validates the
 output before committing the result and queue transition in one SQLite
-transaction. Drizzle owns the typed schema and queries; local libSQL provides the
-Node.js 20-compatible SQLite driver. Every retry uses a fresh worker context.
+transaction. Drizzle owns the typed schema and queries, while Node's built-in
+`node:sqlite` module provides the SQLite driver without another runtime package.
+Every retry uses a fresh worker context.
 
 The database stores each ID with its exact input hash, and results with both the
 input hash and task execution hash. Cache reuse requires all of them to match. The

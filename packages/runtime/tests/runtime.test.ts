@@ -1,4 +1,4 @@
-import type { InValue } from '@libsql/client';
+import type { SQLInputValue } from 'node:sqlite';
 import type { PrepareOptions } from '../src/state.js';
 import {
   mkdir,
@@ -13,8 +13,8 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
-import { createClient } from '@libsql/client/sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { stringify as stringifyYaml } from 'yaml';
@@ -172,12 +172,16 @@ async function readStrict(path: string): Promise<unknown> {
 async function sqliteRows(
   database: string,
   sql: string,
-  args: InValue[] = [],
+  args: SQLInputValue[] = [],
 ): Promise<Array<Record<string, unknown>>> {
-  const client = createClient({ url: `file:${database}` });
+  const client = new DatabaseSync(database);
   try {
-    const result = await client.execute({ sql, args });
-    return result.rows.map(row => ({ ...row }));
+    const statement = client.prepare(sql);
+    if (!/^\s*(?:SELECT|PRAGMA|WITH)\b/i.test(sql)) {
+      statement.run(...args);
+      return [];
+    }
+    return statement.all(...args).map(row => ({ ...row }));
   } finally {
     client.close();
   }
@@ -968,7 +972,7 @@ describe('agentJobsRuntime', () => {
     });
   });
 
-  it('doctor reports the Node 20.6 runtime floor', async () => {
+  it('doctor reports the Node 22.13 runtime floor', async () => {
     const context = await fixture();
     const diagnosis = await context.runtime.doctor({ taskSpec: context.specPath });
     const nodeCheck = (diagnosis.checks as Array<Record<string, unknown>>).find(
@@ -978,7 +982,7 @@ describe('agentJobsRuntime', () => {
     expect(nodeCheck).toEqual({
       name: 'node',
       ok: true,
-      detail: { version: process.versions.node, required: '>=20.6' },
+      detail: { version: process.versions.node, required: '>=22.13' },
     });
   });
 

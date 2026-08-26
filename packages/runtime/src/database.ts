@@ -1,17 +1,19 @@
-import type { Client, Transaction } from '@libsql/client';
-import type { LibSQLDatabase } from 'drizzle-orm/libsql';
-import { createClient } from '@libsql/client/sqlite3';
-import { drizzle } from 'drizzle-orm/libsql/sqlite3';
+import type { NodeSQLiteDatabase } from 'drizzle-orm/node-sqlite';
+import type { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync as SQLiteDatabase } from 'node:sqlite';
+import { drizzle } from 'drizzle-orm/node-sqlite';
 
-import { databaseSchema } from './database-schema.js';
 import { AgentJobsError } from './errors.js';
 
 export const DATABASE_VERSION = 1;
 
-export type AgentJobsDatabase = LibSQLDatabase<typeof databaseSchema>;
+export type AgentJobsDatabase = NodeSQLiteDatabase;
+interface DatabaseMetadataRow {
+  value?: unknown;
+}
 
 export interface OpenDatabase {
-  client: Client;
+  client: DatabaseSync;
   close: () => void;
   db: AgentJobsDatabase;
 }
@@ -24,23 +26,37 @@ export interface OpenDatabaseOptions {
 
 /** Run a Drizzle callback under BEGIN IMMEDIATE to serialize queue writers. */
 export async function writeTransaction<T>(
-  client: Client,
+  client: DatabaseSync,
   operation: (database: AgentJobsDatabase) => Promise<T>,
 ): Promise<T> {
-  const transaction = await client.transaction('write');
+  return await runTransaction(client, 'BEGIN IMMEDIATE', operation);
+}
+
+/** Read multiple queries from one consistent SQLite snapshot. */
+export async function readTransaction<T>(
+  client: DatabaseSync,
+  operation: (database: AgentJobsDatabase) => Promise<T>,
+): Promise<T> {
+  return await runTransaction(client, 'BEGIN', operation);
+}
+
+async function runTransaction<T>(
+  client: DatabaseSync,
+  begin: 'BEGIN' | 'BEGIN IMMEDIATE',
+  operation: (database: AgentJobsDatabase) => Promise<T>,
+): Promise<T> {
+  client.exec(begin);
   try {
-    const result = await operation(databaseForTransaction(transaction));
-    await transaction.commit();
+    const result = await operation(databaseForClient(client));
+    client.exec('COMMIT');
     return result;
   } catch (error) {
     try {
-      await transaction.rollback();
+      client.exec('ROLLBACK');
     } catch {
-      // Preserve the operation error; close() below still releases resources.
+      // Preserve the operation error.
     }
     throw error;
-  } finally {
-    transaction.close();
   }
 }
 
@@ -130,26 +146,40 @@ export async function openAgentJobsDatabase(
   options: OpenDatabaseOptions = {},
 ): Promise<OpenDatabase> {
   const release = await acquireDatabaseOperation(path);
-  const client = createClient({ url: `file:${path}` });
   try {
-    await client.executeMultiple(CONNECTION_SQL);
-    if (options.initialize === true)
-      await initializeDatabase(client);
-    await ensureDatabaseVersion(client);
-    let closed = false;
-    return {
-      client,
-      close: () => {
-        if (closed)
-          return;
-        closed = true;
+    const client = new SQLiteDatabase(path, {
+      enableDoubleQuotedStringLiterals: false,
+      enableForeignKeyConstraints: true,
+    });
+    try {
+      client.exec(CONNECTION_SQL);
+      if (options.initialize === true)
+        initializeDatabase(client);
+      ensureDatabaseVersion(client);
+      let closed = false;
+      return {
+        client,
+        close: () => {
+          if (closed)
+            return;
+          closed = true;
+          try {
+            client.close();
+          } finally {
+            release();
+          }
+        },
+        db: databaseForClient(client),
+      };
+    } catch (error) {
+      try {
         client.close();
-        release();
-      },
-      db: drizzle({ client, schema: databaseSchema }),
-    };
+      } catch {
+        // Preserve the initialization error.
+      }
+      throw error;
+    }
   } catch (error) {
-    client.close();
     release();
     if (error instanceof AgentJobsError)
       throw error;
@@ -161,16 +191,13 @@ export async function openAgentJobsDatabase(
   }
 }
 
-async function initializeDatabase(client: Client): Promise<void> {
-  const existing = await client.execute({
-    sql: `
-      SELECT 1 FROM sqlite_master
-      WHERE type = 'table' AND name = 'database_metadata'
-    `,
-    args: [],
-  });
-  if (existing.rows.length === 0)
-    await client.executeMultiple(SCHEMA_SQL);
+function initializeDatabase(client: DatabaseSync): void {
+  const existing = client.prepare(`
+    SELECT 1 FROM sqlite_master
+    WHERE type = 'table' AND name = 'database_metadata'
+  `).get();
+  if (existing === undefined)
+    client.exec(SCHEMA_SQL);
 }
 
 async function acquireDatabaseOperation(path: string): Promise<() => void> {
@@ -190,27 +217,21 @@ async function acquireDatabaseOperation(path: string): Promise<() => void> {
   };
 }
 
-async function ensureDatabaseVersion(client: Client): Promise<void> {
-  const existing = await client.execute({
-    sql: 'SELECT value FROM database_metadata WHERE key = ?',
-    args: ['schema_version'],
-  });
-  if (existing.rows.length === 0) {
-    await client.execute({
-      sql: `
-        INSERT INTO database_metadata(key, value) VALUES (?, ?)
-        ON CONFLICT(key) DO NOTHING
-      `,
-      args: ['schema_version', String(DATABASE_VERSION)],
-    });
+function ensureDatabaseVersion(client: DatabaseSync): void {
+  const selectVersion = client.prepare(
+    'SELECT value FROM database_metadata WHERE key = ?',
+  );
+  let persisted = selectVersion.get('schema_version') as
+    DatabaseMetadataRow | undefined;
+  if (persisted === undefined) {
+    client.prepare(`
+      INSERT INTO database_metadata(key, value) VALUES (?, ?)
+      ON CONFLICT(key) DO NOTHING
+    `).run('schema_version', String(DATABASE_VERSION));
+    persisted = selectVersion.get('schema_version') as
+      DatabaseMetadataRow | undefined;
   }
-  const persisted = existing.rows.length === 0
-    ? await client.execute({
-        sql: 'SELECT value FROM database_metadata WHERE key = ?',
-        args: ['schema_version'],
-      })
-    : existing;
-  const version = persisted.rows[0]?.value;
+  const version = persisted?.value;
   if (version !== String(DATABASE_VERSION)) {
     throw new AgentJobsError(
       'incompatible_database',
@@ -224,10 +245,6 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function databaseForTransaction(transaction: Transaction): AgentJobsDatabase {
-  // Drizzle only needs execute/batch here, both of which Transaction implements.
-  return drizzle({
-    client: transaction as unknown as Client,
-    schema: databaseSchema,
-  });
+function databaseForClient(client: DatabaseSync): NodeSQLiteDatabase {
+  return drizzle({ client });
 }
