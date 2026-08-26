@@ -32,8 +32,14 @@ The package is currently private and not yet available from the public npm
 registry. Until it is published, contributors can use the local setup described in
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
-By default, `init` configures the current project for both Codex and Claude. You can
-choose a path or a single host:
+In an interactive terminal, `init` asks for any location, path, or agent targets
+that were not provided as arguments. Agent targets use a checkbox prompt with no
+initial selection, so the user explicitly chooses Codex, Claude, or both. Values
+supplied on the command line are not asked again. The resolved choices are shown in
+a preview before files are changed.
+
+The location prompt starts at the current project. You can also provide a path or a
+single host directly:
 
 ```bash
 # Configure another project
@@ -46,9 +52,11 @@ npx agent-jobs init ./my-project --target codex
 npx agent-jobs init --global --target claude
 ```
 
-The installer shows the target path and asks for confirmation. Use `--yes` in a
-non-interactive environment. Use `--force` only when you intentionally want to
-replace managed files that have been edited since installation.
+Use `--yes` to skip the final confirmation. In a non-interactive environment,
+`--yes` is required; omitted values use the current project and both agent hosts.
+Use `--force` only when you intentionally want to replace managed files that have
+been edited since installation. `uninstall` uses the same interactive selection and
+preview flow.
 
 Restart Codex or Claude after installation so it discovers the new skill, agents,
 and MCP configuration.

@@ -29,6 +29,9 @@
     "test": "pnpm --filter @agent-jobs/runtime test && vitest run",
     "test:watch": "vitest"
   },
+  "dependencies": {
+    "@clack/prompts": "^1.7.0"
+  },
   "devDependencies": {
     "@agent-jobs/runtime": "workspace:*",
     "@antfu/eslint-config": "^9.3.0",

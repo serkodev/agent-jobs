@@ -1,3 +1,4 @@
+import type { InstallerPrompts } from '../src/installer.js';
 import {
   mkdir,
   mkdtemp,
@@ -9,10 +10,11 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 
+import { join } from 'node:path';
 import { AgentJobsRuntime } from '@agent-jobs/runtime';
-import { afterEach, describe, expect, it } from 'vitest';
+
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import YAML from 'yaml';
 
@@ -38,6 +40,28 @@ function capture(): {
     } as Pick<NodeJS.WritableStream, 'write'>,
     read: () => value,
   };
+}
+
+function fakePrompts(options: {
+  multiselect?: Array<Array<string> | symbol>;
+  select?: Array<string | symbol>;
+  text?: Array<string | symbol>;
+  confirm?: boolean | symbol;
+} = {}): InstallerPrompts {
+  const multiselectAnswers = [...(options.multiselect ?? [])];
+  const selectAnswers = [...(options.select ?? [])];
+  const textAnswers = [...(options.text ?? [])];
+  return {
+    cancel: vi.fn(),
+    confirm: vi.fn(async () => options.confirm ?? true),
+    intro: vi.fn(),
+    isCancel: vi.fn((value: unknown) => typeof value === 'symbol'),
+    multiselect: vi.fn(async () => multiselectAnswers.shift()),
+    note: vi.fn(),
+    outro: vi.fn(),
+    select: vi.fn(async () => selectAnswers.shift()),
+    text: vi.fn(async () => textAnswers.shift()),
+  } as unknown as InstallerPrompts;
 }
 
 async function fixture(): Promise<{
@@ -199,32 +223,119 @@ describe('agent-jobs installer', () => {
     expect(stderr.read()).toContain('Restart Codex and/or Claude');
   });
 
-  it('does not create a missing target before confirmation', async () => {
+  it('previews provided options without prompting for them', async () => {
     const context = await fixture();
     const target = join(context.root, 'new', 'project');
     const canonicalTarget = join(await realpath(context.root), 'new', 'project');
     const stdout = capture();
-    let prompt = '';
+    const prompts = fakePrompts({ confirm: false });
 
     await expect(
-      runInstallerCommand('init', [target], {
+      runInstallerCommand('init', [target, '--target', 'codex'], {
         cwd: context.cwd,
         homeDir: context.home,
         bundlePath: context.bundle,
         stdout: stdout.stream,
         stderr: capture().stream,
         isTTY: true,
-        confirm: async (message) => {
-          prompt = message;
-          return false;
-        },
+        prompts,
       }),
     ).resolves.toBe(0);
 
-    expect(prompt).toContain(`Path:    ${canonicalTarget}`);
-    expect(prompt).toContain('Create:  yes');
-    expect(stdout.read()).toContain('Cancelled');
+    expect(prompts.select).not.toHaveBeenCalled();
+    expect(prompts.multiselect).not.toHaveBeenCalled();
+    expect(prompts.text).not.toHaveBeenCalled();
+    expect(prompts.note).toHaveBeenCalledWith(
+      expect.stringContaining(`Path:    ${canonicalTarget}`),
+      'Initialization preview',
+      expect.any(Object),
+    );
+    expect(prompts.note).toHaveBeenCalledWith(
+      expect.stringContaining('Targets: Codex'),
+      'Initialization preview',
+      expect.any(Object),
+    );
+    expect(prompts.confirm).toHaveBeenCalledOnce();
+    expect(prompts.confirm).toHaveBeenCalledWith(
+      expect.objectContaining({ initialValue: true }),
+    );
+    expect(prompts.cancel).toHaveBeenCalledWith(
+      expect.stringContaining('Cancelled; no files were changed'),
+      expect.any(Object),
+    );
+    expect(stdout.read()).toBe('');
     await expect(exists(target)).resolves.toBe(false);
+  });
+
+  it('prompts for missing location, path, and target before previewing', async () => {
+    const context = await fixture();
+    const target = join(context.root, 'selected', 'project');
+    const prompts = fakePrompts({
+      multiselect: [['claude']],
+      select: ['custom'],
+      text: [target],
+    });
+
+    await expect(
+      runInstallerCommand('init', [], {
+        cwd: context.cwd,
+        homeDir: context.home,
+        bundlePath: context.bundle,
+        stdout: capture().stream,
+        stderr: capture().stream,
+        isTTY: true,
+        prompts,
+      }),
+    ).resolves.toBe(0);
+
+    expect(prompts.select).toHaveBeenCalledOnce();
+    expect(prompts.multiselect).toHaveBeenCalledOnce();
+    expect(prompts.multiselect).toHaveBeenCalledWith(
+      expect.objectContaining({
+        initialValues: [],
+        required: true,
+      }),
+    );
+    expect(prompts.text).toHaveBeenCalledOnce();
+    expect(prompts.note).toHaveBeenCalledWith(
+      expect.stringContaining('Targets: Claude'),
+      'Initialization preview',
+      expect.any(Object),
+    );
+    expect(prompts.confirm).toHaveBeenCalledOnce();
+    expect(prompts.outro).toHaveBeenCalledWith(
+      expect.stringContaining('Initialized agent-jobs'),
+      expect.any(Object),
+    );
+    await expect(
+      exists(join(target, '.claude', 'agents', 'agent_job_worker.md')),
+    ).resolves.toBe(true);
+    await expect(exists(join(target, '.codex'))).resolves.toBe(false);
+  });
+
+  it('handles prompt cancellation without planning or changing files', async () => {
+    const context = await fixture();
+    const prompts = fakePrompts({ select: [Symbol('cancel')] });
+
+    await expect(
+      runInstallerCommand('init', [], {
+        cwd: context.cwd,
+        homeDir: context.home,
+        bundlePath: context.bundle,
+        stdout: capture().stream,
+        stderr: capture().stream,
+        isTTY: true,
+        prompts,
+      }),
+    ).resolves.toBe(0);
+
+    expect(prompts.cancel).toHaveBeenCalledWith(
+      'No files were changed.',
+      expect.any(Object),
+    );
+    expect(prompts.note).not.toHaveBeenCalled();
+    expect(prompts.confirm).not.toHaveBeenCalled();
+    await expect(exists(join(context.cwd, '.agent-jobs'))).resolves.toBe(false);
   });
 
   it('creates a missing path recursively only after --yes', async () => {

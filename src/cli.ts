@@ -66,6 +66,14 @@ Commands:
   collect   Collect valid outputs in input order
   doctor    Check the local installation
   mcp       Run the agent_jobs stdio MCP server
+
+Installer options:
+  [path]                  Configure a project at this path
+  --target <host>         all, codex, or claude
+  --global                Configure the current user's home directory
+  --yes                   Skip the final confirmation
+  --force                 Replace edited managed files after backing them up
+  --json                  Emit a machine-readable result (requires --yes)
 `;
 
 function invalidArguments(message: string): never {

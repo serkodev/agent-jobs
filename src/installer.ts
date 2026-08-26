@@ -1,3 +1,4 @@
+import type { Readable as NodeReadable, Writable as NodeWritable } from 'node:stream';
 import { createHash } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
 import {
@@ -13,7 +14,6 @@ import {
 import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import process from 'node:process';
-import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
@@ -22,6 +22,7 @@ import {
   atomicWriteText,
   stringifyStrictJson,
 } from '@agent-jobs/runtime';
+import * as clack from '@clack/prompts';
 
 import {
   AGENTS_BLOCK_END,
@@ -54,11 +55,15 @@ type Readable = NodeJS.ReadableStream & { isTTY?: boolean };
 
 interface InstallArguments {
   path?: string;
-  target: InstallTarget;
+  target?: InstallTarget;
   global: boolean;
   yes: boolean;
   force: boolean;
   json: boolean;
+}
+
+interface ResolvedInstallArguments extends InstallArguments {
+  target: InstallTarget;
 }
 
 interface PlannedFile {
@@ -102,6 +107,19 @@ interface InstallLocations {
   settings?: string;
 }
 
+export type InstallerPrompts = Pick<
+  typeof clack,
+  | 'cancel'
+  | 'confirm'
+  | 'intro'
+  | 'isCancel'
+  | 'multiselect'
+  | 'note'
+  | 'outro'
+  | 'select'
+  | 'text'
+>;
+
 export interface InstallerEnvironment {
   cwd?: string;
   homeDir?: string;
@@ -110,7 +128,7 @@ export interface InstallerEnvironment {
   stdout?: Writable;
   stderr?: Writable;
   isTTY?: boolean;
-  confirm?: (message: string) => Promise<boolean>;
+  prompts?: InstallerPrompts;
 }
 
 export interface InstallerCommandResult extends Record<string, unknown> {
@@ -149,8 +167,11 @@ function parseInstallArguments(args: readonly string[]): InstallArguments {
   if (parsed.positionals.length > 1) {
     invalidArguments('init and uninstall accept at most one path');
   }
-  const rawTarget = parsed.values.target ?? 'all';
-  if (typeof rawTarget !== 'string' || !TARGETS.has(rawTarget as InstallTarget)) {
+  const rawTarget = parsed.values.target;
+  if (
+    rawTarget !== undefined
+    && (typeof rawTarget !== 'string' || !TARGETS.has(rawTarget as InstallTarget))
+  ) {
     invalidArguments('Invalid --target; expected all, codex, or claude');
   }
   const global = parsed.values.global === true;
@@ -159,7 +180,7 @@ function parseInstallArguments(args: readonly string[]): InstallArguments {
   }
   return {
     path: parsed.positionals[0],
-    target: rawTarget as InstallTarget,
+    target: rawTarget as InstallTarget | undefined,
     global,
     yes: parsed.values.yes === true,
     force: parsed.values.force === true,
@@ -322,7 +343,7 @@ function mergeClaudeSettings(current: string | null, path: string): string {
 }
 
 async function resolveRoot(
-  args: InstallArguments,
+  args: ResolvedInstallArguments,
   cwd: string,
   homeDir: string,
   operation: 'init' | 'uninstall',
@@ -869,7 +890,7 @@ async function applyUninstall(
 
 async function createPlan(
   operation: 'init' | 'uninstall',
-  args: InstallArguments,
+  args: ResolvedInstallArguments,
   environment: InstallerEnvironment,
 ): Promise<InstallPlan> {
   const cwd = resolve(environment.cwd ?? process.cwd());
@@ -918,34 +939,135 @@ async function createPlan(
   };
 }
 
-function promptText(plan: InstallPlan): string {
-  const verb = plan.operation === 'init' ? 'Initialize' : 'Uninstall';
+function previewText(plan: InstallPlan, args: ResolvedInstallArguments): string {
   const targets = plan.targets
     .map(target => (target === 'codex' ? 'Codex' : 'Claude'))
     .join(', ');
-  const create = plan.createRoot ? 'yes' : 'no';
-  return `${verb} agent-jobs?\n\nPath:    ${plan.root}\nCreate:  ${create}\nTargets: ${targets}\nScope:   ${plan.scope}\n\nProceed? [y/N] `;
+  return [
+    `Path:    ${plan.root}`,
+    `Scope:   ${plan.scope}`,
+    `Targets: ${targets}`,
+    `Create:  ${plan.createRoot ? 'yes' : 'no'}`,
+    `Force:   ${args.force ? 'yes' : 'no'}`,
+  ].join('\n');
 }
 
-async function confirmPlan(plan: InstallPlan, environment: InstallerEnvironment): Promise<boolean> {
-  const message = promptText(plan);
-  if (environment.confirm)
-    return environment.confirm(message);
-  const input = environment.stdin ?? (process.stdin as Readable);
-  const output = environment.stderr ?? process.stderr;
-  const rl = createInterface({
-    input,
-    output: output as NodeJS.WritableStream,
-    terminal: true,
-  });
-  try {
-    const answer = await rl.question(message);
-    return /^(?:y|yes)$/i.test(answer.trim());
-  } catch {
-    return false;
-  } finally {
-    rl.close();
+function promptIo(environment: InstallerEnvironment): {
+  input: NodeReadable;
+  output: NodeWritable;
+} {
+  return {
+    input: (environment.stdin ?? process.stdin) as NodeReadable,
+    output: (environment.stderr ?? process.stderr) as NodeWritable,
+  };
+}
+
+async function interactiveArguments(
+  operation: 'init' | 'uninstall',
+  parsed: InstallArguments,
+  environment: InstallerEnvironment,
+): Promise<ResolvedInstallArguments | undefined> {
+  const prompts = environment.prompts ?? clack;
+  const io = promptIo(environment);
+  const cwd = resolve(environment.cwd ?? process.cwd());
+  const homeDir = resolve(environment.homeDir ?? homedir());
+  let path = parsed.path;
+  let global = parsed.global;
+
+  prompts.intro(
+    operation === 'init' ? 'Initialize Agent Jobs' : 'Uninstall Agent Jobs',
+    io,
+  );
+
+  if (!global && path === undefined) {
+    const location = await prompts.select<'current' | 'custom' | 'global'>({
+      message: operation === 'init'
+        ? 'Where should Agent Jobs be configured?'
+        : 'Where is Agent Jobs installed?',
+      options: [
+        { value: 'current', label: 'Current project', hint: cwd },
+        { value: 'custom', label: 'Another project', hint: 'Enter a path' },
+        { value: 'global', label: 'Global', hint: homeDir },
+      ],
+      initialValue: 'current',
+      ...io,
+    });
+    if (prompts.isCancel(location)) {
+      prompts.cancel('No files were changed.', io);
+      return undefined;
+    }
+    if (location === 'global') {
+      global = true;
+    } else if (location === 'custom') {
+      const customPath = await prompts.text({
+        message: 'Which project path should be configured?',
+        placeholder: cwd,
+        validate(value) {
+          if (!value || value.trim().length === 0)
+            return 'Path is required.';
+        },
+        ...io,
+      });
+      if (prompts.isCancel(customPath)) {
+        prompts.cancel('No files were changed.', io);
+        return undefined;
+      }
+      path = customPath.trim();
+    } else {
+      path = '.';
+    }
   }
+
+  let target = parsed.target;
+  if (target === undefined) {
+    const selected = await prompts.multiselect<'codex' | 'claude'>({
+      message: operation === 'init'
+        ? 'Which agent hosts should be configured?'
+        : 'Which agent hosts should be removed?',
+      options: [
+        { value: 'codex', label: 'Codex' },
+        { value: 'claude', label: 'Claude' },
+      ],
+      initialValues: [],
+      required: true,
+      ...io,
+    });
+    if (prompts.isCancel(selected)) {
+      prompts.cancel('No files were changed.', io);
+      return undefined;
+    }
+    target = selected.length === 2 ? 'all' : selected[0];
+  }
+
+  return { ...parsed, path, target, global };
+}
+
+function resolvedArguments(parsed: InstallArguments): ResolvedInstallArguments {
+  return { ...parsed, target: parsed.target ?? 'all' };
+}
+
+function showPreview(
+  plan: InstallPlan,
+  args: ResolvedInstallArguments,
+  environment: InstallerEnvironment,
+): void {
+  const title = plan.operation === 'init' ? 'Initialization preview' : 'Uninstall preview';
+  (environment.prompts ?? clack).note(previewText(plan, args), title, promptIo(environment));
+}
+
+async function confirmPlan(
+  operation: 'init' | 'uninstall',
+  environment: InstallerEnvironment,
+): Promise<boolean | undefined> {
+  const prompts = environment.prompts ?? clack;
+  const answer = await prompts.confirm({
+    message: operation === 'init' ? 'Initialize with these options?' : 'Uninstall these files?',
+    initialValue: true,
+    ...promptIo(environment),
+  });
+  if (prompts.isCancel(answer))
+    return undefined;
+  return answer;
 }
 
 function humanResult(result: InstallerCommandResult): string {
@@ -957,14 +1079,30 @@ function humanResult(result: InstallerCommandResult): string {
   return `${verb} agent-jobs in ${result.path}; ${result.changed_files.length} file(s) changed.\n`;
 }
 
+function interactiveResult(result: InstallerCommandResult): string {
+  const lines = [humanResult(result).trim()];
+  lines.push(...result.warnings.map(warning => `Warning: ${warning}`));
+  if (result.status === 'initialized') {
+    lines.push('Restart Codex and/or Claude to load the new skill, agents, and MCP server.');
+  }
+  return lines.join('\n');
+}
+
 export async function runInstallerCommand(
   operation: 'init' | 'uninstall',
   argv: readonly string[],
   environment: InstallerEnvironment = {},
 ): Promise<number> {
-  const args = parseInstallArguments(argv);
+  const parsed = parseInstallArguments(argv);
   const stdout = environment.stdout ?? process.stdout;
   const stderr = environment.stderr ?? process.stderr;
+  const tty = environment.isTTY ?? environment.stdin?.isTTY ?? process.stdin.isTTY === true;
+  const interactive = tty && !parsed.json;
+  const args = interactive
+    ? await interactiveArguments(operation, parsed, { ...environment, stderr })
+    : resolvedArguments(parsed);
+  if (args === undefined)
+    return 0;
   const plan = await createPlan(operation, args, environment);
   const base = {
     ok: true as const,
@@ -980,21 +1118,26 @@ export async function runInstallerCommand(
       changed_files: [],
       warnings: [],
     };
-    stdout.write(args.json ? `${JSON.stringify(result)}\n` : humanResult(result));
+    if (args.json || !interactive)
+      stdout.write(args.json ? `${JSON.stringify(result)}\n` : humanResult(result));
+    else
+      (environment.prompts ?? clack).outro(humanResult(result).trim(), promptIo(environment));
     return 0;
   }
-  const tty = environment.isTTY ?? environment.stdin?.isTTY ?? process.stdin.isTTY === true;
-  if (!args.yes && (args.json || !tty)) {
+  if (!args.yes && !interactive) {
     invalidArguments('Non-interactive init/uninstall requires --yes');
   }
-  if (!args.yes && !(await confirmPlan(plan, { ...environment, stderr }))) {
+  if (interactive)
+    showPreview(plan, args, { ...environment, stderr });
+  const confirmation = args.yes ? true : await confirmPlan(operation, { ...environment, stderr });
+  if (confirmation !== true) {
     const result: InstallerCommandResult = {
       ...base,
       status: 'cancelled',
       changed_files: [],
       warnings: [],
     };
-    stdout.write(args.json ? `${JSON.stringify(result)}\n` : humanResult(result));
+    (environment.prompts ?? clack).cancel(humanResult(result).trim(), promptIo(environment));
     return 0;
   }
   const applied = operation === 'init' ? await applyInit(plan) : await applyUninstall(plan);
@@ -1004,9 +1147,14 @@ export async function runInstallerCommand(
     changed_files: applied.changed,
     warnings: applied.warnings,
   };
-  stdout.write(args.json ? `${JSON.stringify(result)}\n` : humanResult(result));
-  for (const warning of applied.warnings) stderr.write(`Warning: ${warning}\n`);
-  if (operation === 'init') {
+  if (args.json || !interactive)
+    stdout.write(args.json ? `${JSON.stringify(result)}\n` : humanResult(result));
+  else
+    (environment.prompts ?? clack).outro(interactiveResult(result), promptIo(environment));
+  if (!interactive) {
+    for (const warning of applied.warnings) stderr.write(`Warning: ${warning}\n`);
+  }
+  if (operation === 'init' && !interactive) {
     stderr.write(
       'Restart Codex and/or Claude to load the new skill, agents, and MCP server.\n',
     );
