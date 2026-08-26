@@ -3,6 +3,11 @@
 Run the same structured task across many records with native Codex or Claude
 workers.
 
+> [!WARNING]
+> **Experimental project — work in progress.** APIs, CLI behavior, schemas, and
+> generated integration files may change without notice. Agent Jobs is not yet
+> recommended for production workloads.
+
 Agent Jobs solves the coordination problems that appear when a normal agent prompt
 turns into a batch workload: shared context grows, results get mixed together,
 progress is easy to lose, and concurrent workers can overwrite one another. It
