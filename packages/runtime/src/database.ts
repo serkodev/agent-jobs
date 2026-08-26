@@ -1,16 +1,26 @@
 import type { NodeSQLiteDatabase } from 'drizzle-orm/node-sqlite';
 import type { DatabaseSync } from 'node:sqlite';
 import { DatabaseSync as SQLiteDatabase } from 'node:sqlite';
+import { setTimeout as delay } from 'node:timers/promises';
+import { and, eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/node-sqlite';
+import { migrateSync, sqliteTable, text } from 'drizzle-orm/sqlite-core';
 
+import { databaseMigrations } from './database-migrations.js';
+import { databaseMetadata } from './database-schema.js';
 import { AgentJobsError } from './errors.js';
 
 export const DATABASE_VERSION = 1;
 
 export type AgentJobsDatabase = NodeSQLiteDatabase;
-interface DatabaseMetadataRow {
-  value?: unknown;
-}
+
+const sqliteSchema = sqliteTable('sqlite_master', {
+  name: text('name').notNull(),
+  type: text('type').notNull(),
+});
+const migrationLedger = sqliteTable('__drizzle_migrations', {
+  name: text('name'),
+});
 
 export interface OpenDatabase {
   client: DatabaseSync;
@@ -19,10 +29,6 @@ export interface OpenDatabase {
 }
 
 const databaseOperationTails = new Map<string, Promise<void>>();
-
-export interface OpenDatabaseOptions {
-  initialize?: boolean;
-}
 
 /** Run a Drizzle callback under BEGIN IMMEDIATE to serialize queue writers. */
 export async function writeTransaction<T>(
@@ -61,89 +67,14 @@ async function runTransaction<T>(
 }
 
 const CONNECTION_SQL = `
-PRAGMA foreign_keys = ON;
 PRAGMA synchronous = FULL;
 PRAGMA busy_timeout = 30000;
 `;
-
-const SCHEMA_SQL = `
-PRAGMA journal_mode = WAL;
-
-CREATE TABLE IF NOT EXISTS database_metadata (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS jobs (
-  job_id TEXT PRIMARY KEY,
-  state_version INTEGER NOT NULL,
-  session_status TEXT NOT NULL CHECK (session_status IN ('active', 'superseded')),
-  superseded_at TEXT,
-  superseded_by_job_id TEXT,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  input_data TEXT NOT NULL,
-  task_spec TEXT NOT NULL,
-  output_dir TEXT NOT NULL,
-  id_column_key TEXT NOT NULL,
-  records_path TEXT,
-  source_hash TEXT NOT NULL,
-  task_hash TEXT NOT NULL,
-  execution_hash TEXT NOT NULL,
-  spec_json TEXT NOT NULL,
-  settings_json TEXT NOT NULL,
-  cache_diagnostics_json TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS current_job (
-  slot INTEGER PRIMARY KEY CHECK (slot = 1),
-  job_id TEXT NOT NULL REFERENCES jobs(job_id)
-);
-
-CREATE TABLE IF NOT EXISTS results (
-  result_id INTEGER PRIMARY KEY AUTOINCREMENT,
-  record_id TEXT NOT NULL,
-  input_hash TEXT NOT NULL,
-  execution_hash TEXT NOT NULL,
-  output_json TEXT NOT NULL,
-  output_hash TEXT NOT NULL,
-  created_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS results_lookup_index
-ON results(record_id, input_hash, execution_hash);
-
-CREATE TABLE IF NOT EXISTS job_records (
-  job_id TEXT NOT NULL REFERENCES jobs(job_id),
-  input_index INTEGER NOT NULL,
-  record_id TEXT NOT NULL,
-  input_hash TEXT NOT NULL,
-  input_json TEXT NOT NULL,
-  status TEXT NOT NULL CHECK (
-    status IN (
-      'pending', 'leased', 'running', 'completed',
-      'skipped_valid', 'skipped_invalid', 'failed'
-    )
-  ),
-  attempts INTEGER NOT NULL DEFAULT 0,
-  lease_token TEXT UNIQUE,
-  last_error_json TEXT,
-  leased_at TEXT,
-  started_at TEXT,
-  completed_at TEXT,
-  cache_validation_errors_json TEXT,
-  result_id INTEGER REFERENCES results(result_id),
-  PRIMARY KEY (job_id, record_id),
-  UNIQUE (job_id, input_index)
-);
-
-CREATE INDEX IF NOT EXISTS job_records_queue_index
-ON job_records(job_id, status, input_index);
-`;
+const MIGRATION_CONNECTION_SQL = 'PRAGMA journal_mode = WAL;';
+const MIGRATION_RETRY_DELAYS_MS = [10, 20, 40, 80, 160, 320, 640];
 
 export async function openAgentJobsDatabase(
   path: string,
-  options: OpenDatabaseOptions = {},
 ): Promise<OpenDatabase> {
   const release = await acquireDatabaseOperation(path);
   try {
@@ -153,9 +84,9 @@ export async function openAgentJobsDatabase(
     });
     try {
       client.exec(CONNECTION_SQL);
-      if (options.initialize === true)
-        initializeDatabase(client);
-      ensureDatabaseVersion(client);
+      const db = databaseForClient(client);
+      await migrateDatabase(client, db);
+      await ensureDatabaseVersion(db);
       let closed = false;
       return {
         client,
@@ -169,7 +100,7 @@ export async function openAgentJobsDatabase(
             release();
           }
         },
-        db: databaseForClient(client),
+        db,
       };
     } catch (error) {
       try {
@@ -191,13 +122,44 @@ export async function openAgentJobsDatabase(
   }
 }
 
-function initializeDatabase(client: DatabaseSync): void {
-  const existing = client.prepare(`
-    SELECT 1 FROM sqlite_master
-    WHERE type = 'table' AND name = 'database_metadata'
-  `).get();
-  if (existing === undefined)
-    client.exec(SCHEMA_SQL);
+async function migrateDatabase(
+  client: DatabaseSync,
+  database: AgentJobsDatabase,
+): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      if (!(await hasPendingMigrations(database)))
+        return;
+      client.exec(MIGRATION_CONNECTION_SQL);
+      migrateSync(databaseMigrations, database._.session);
+      return;
+    } catch (error) {
+      const retryDelay = MIGRATION_RETRY_DELAYS_MS[attempt];
+      if (retryDelay === undefined || !isDatabaseBusy(error))
+        throw error;
+      await delay(retryDelay);
+    }
+  }
+}
+
+async function hasPendingMigrations(
+  database: AgentJobsDatabase,
+): Promise<boolean> {
+  const [ledgerTable] = await database
+    .select({ name: sqliteSchema.name })
+    .from(sqliteSchema)
+    .where(and(
+      eq(sqliteSchema.type, 'table'),
+      eq(sqliteSchema.name, '__drizzle_migrations'),
+    ))
+    .limit(1);
+  if (ledgerTable === undefined)
+    return true;
+  const applied = await database
+    .select({ name: migrationLedger.name })
+    .from(migrationLedger);
+  const appliedNames = new Set(applied.map(migration => migration.name));
+  return databaseMigrations.some(migration => !appliedNames.has(migration.name));
 }
 
 async function acquireDatabaseOperation(path: string): Promise<() => void> {
@@ -217,21 +179,17 @@ async function acquireDatabaseOperation(path: string): Promise<() => void> {
   };
 }
 
-function ensureDatabaseVersion(client: DatabaseSync): void {
-  const selectVersion = client.prepare(
-    'SELECT value FROM database_metadata WHERE key = ?',
-  );
-  let persisted = selectVersion.get('schema_version') as
-    DatabaseMetadataRow | undefined;
-  if (persisted === undefined) {
-    client.prepare(`
-      INSERT INTO database_metadata(key, value) VALUES (?, ?)
-      ON CONFLICT(key) DO NOTHING
-    `).run('schema_version', String(DATABASE_VERSION));
-    persisted = selectVersion.get('schema_version') as
-      DatabaseMetadataRow | undefined;
+async function ensureDatabaseVersion(
+  database: AgentJobsDatabase,
+): Promise<void> {
+  let version = await readDatabaseVersion(database);
+  if (version === undefined) {
+    await database
+      .insert(databaseMetadata)
+      .values({ key: 'schema_version', value: String(DATABASE_VERSION) })
+      .onConflictDoNothing({ target: databaseMetadata.key });
+    version = await readDatabaseVersion(database);
   }
-  const version = persisted?.value;
   if (version !== String(DATABASE_VERSION)) {
     throw new AgentJobsError(
       'incompatible_database',
@@ -241,8 +199,34 @@ function ensureDatabaseVersion(client: DatabaseSync): void {
   }
 }
 
+async function readDatabaseVersion(
+  database: AgentJobsDatabase,
+): Promise<string | undefined> {
+  const [metadata] = await database
+    .select({ value: databaseMetadata.value })
+    .from(databaseMetadata)
+    .where(eq(databaseMetadata.key, 'schema_version'))
+    .limit(1);
+  return metadata?.value;
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isDatabaseBusy(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current = error;
+  while (!seen.has(current)) {
+    seen.add(current);
+    const message = errorMessage(current);
+    if (/\b(?:SQLITE_BUSY|SQLITE_LOCKED)\b|database (?:is|table is) locked/i.test(message))
+      return true;
+    if (typeof current !== 'object' || current === null || !('cause' in current))
+      return false;
+    current = current.cause;
+  }
+  return false;
 }
 
 function databaseForClient(client: DatabaseSync): NodeSQLiteDatabase {

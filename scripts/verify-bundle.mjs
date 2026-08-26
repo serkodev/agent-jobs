@@ -13,6 +13,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import process from 'node:process';
+import { DatabaseSync } from 'node:sqlite';
 import { promisify } from 'node:util';
 
 import { Client } from '@modelcontextprotocol/client';
@@ -103,6 +104,12 @@ Return one summary string.
     outputDir,
   );
   assert.equal(prepared.ok, true);
+  const preparedDatabase = new DatabaseSync(prepared.database);
+  try {
+    preparedDatabase.exec('DROP TABLE __drizzle_migrations');
+  } finally {
+    preparedDatabase.close();
+  }
   const leaseWaves = await Promise.all(
     Array.from({ length: 6 }, () =>
       cli(
@@ -125,6 +132,18 @@ Return one summary string.
     new Set(leases.assignments.map(lease => lease.id)).size,
     leases.assignments.length,
   );
+  const migratedDatabase = new DatabaseSync(prepared.database);
+  try {
+    const ledger = migratedDatabase
+      .prepare('SELECT name FROM __drizzle_migrations ORDER BY id')
+      .all();
+    assert.deepEqual(
+      ledger.map(migration => migration.name),
+      ['20260826113404_init'],
+    );
+  } finally {
+    migratedDatabase.close();
+  }
 
   const transport = new StdioClientTransport({
     command: nodeExecutable,

@@ -1,0 +1,19 @@
+[
+  {
+    "name": "20260826113404_init",
+    "bps": true,
+    "folderMillis": 1787744044000,
+    "hash": "1d5ff8da5dc74614861ac0c69c74aaa17207c20b9e80bfb04a59512af768ea23",
+    "sql": [
+      "CREATE TABLE IF NOT EXISTS `current_job` (\n\t`slot` integer PRIMARY KEY,\n\t`job_id` text NOT NULL,\n\tCONSTRAINT `fk_current_job_job_id_jobs_job_id_fk` FOREIGN KEY (`job_id`) REFERENCES `jobs`(`job_id`),\n\tCONSTRAINT \"current_job_slot_check\" CHECK(\"slot\" = 1)\n);\n",
+      "\nCREATE TABLE IF NOT EXISTS `database_metadata` (\n\t`key` text PRIMARY KEY,\n\t`value` text NOT NULL\n);\n",
+      "\nCREATE TABLE IF NOT EXISTS `job_records` (\n\t`job_id` text NOT NULL,\n\t`input_index` integer NOT NULL,\n\t`record_id` text NOT NULL,\n\t`input_hash` text NOT NULL,\n\t`input_json` text NOT NULL,\n\t`status` text NOT NULL,\n\t`attempts` integer DEFAULT 0 NOT NULL,\n\t`lease_token` text,\n\t`last_error_json` text,\n\t`leased_at` text,\n\t`started_at` text,\n\t`completed_at` text,\n\t`cache_validation_errors_json` text,\n\t`result_id` integer,\n\tCONSTRAINT `job_records_pk` PRIMARY KEY(`job_id`, `record_id`),\n\tCONSTRAINT `fk_job_records_job_id_jobs_job_id_fk` FOREIGN KEY (`job_id`) REFERENCES `jobs`(`job_id`),\n\tCONSTRAINT `fk_job_records_result_id_results_result_id_fk` FOREIGN KEY (`result_id`) REFERENCES `results`(`result_id`),\n\tCONSTRAINT \"job_records_status_check\" CHECK(\"status\" IN (\n        'pending', 'leased', 'running', 'completed',\n        'skipped_valid', 'skipped_invalid', 'failed'\n      ))\n);\n",
+      "\nCREATE TABLE IF NOT EXISTS `jobs` (\n\t`job_id` text PRIMARY KEY,\n\t`state_version` integer NOT NULL,\n\t`session_status` text NOT NULL,\n\t`superseded_at` text,\n\t`superseded_by_job_id` text,\n\t`created_at` text NOT NULL,\n\t`updated_at` text NOT NULL,\n\t`input_data` text NOT NULL,\n\t`task_spec` text NOT NULL,\n\t`output_dir` text NOT NULL,\n\t`id_column_key` text NOT NULL,\n\t`records_path` text,\n\t`source_hash` text NOT NULL,\n\t`task_hash` text NOT NULL,\n\t`execution_hash` text NOT NULL,\n\t`spec_json` text NOT NULL,\n\t`settings_json` text NOT NULL,\n\t`cache_diagnostics_json` text NOT NULL,\n\tCONSTRAINT \"jobs_session_status_check\" CHECK(\"session_status\" IN ('active', 'superseded'))\n);\n",
+      "\nCREATE TABLE IF NOT EXISTS `results` (\n\t`result_id` integer PRIMARY KEY AUTOINCREMENT,\n\t`record_id` text NOT NULL,\n\t`input_hash` text NOT NULL,\n\t`execution_hash` text NOT NULL,\n\t`output_json` text NOT NULL,\n\t`output_hash` text NOT NULL,\n\t`created_at` text NOT NULL\n);\n",
+      "\nCREATE UNIQUE INDEX IF NOT EXISTS `job_records_order_unique` ON `job_records` (`job_id`,`input_index`);",
+      "\nCREATE UNIQUE INDEX IF NOT EXISTS `job_records_lease_unique` ON `job_records` (`lease_token`);",
+      "\nCREATE INDEX IF NOT EXISTS `job_records_queue_index` ON `job_records` (`job_id`,`status`,`input_index`);",
+      "\nCREATE INDEX IF NOT EXISTS `results_lookup_index` ON `results` (`record_id`,`input_hash`,`execution_hash`);\n"
+    ]
+  }
+]

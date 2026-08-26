@@ -393,6 +393,27 @@ describe('agentJobsRuntime', () => {
     expect(parseStrictJson(String(stored!.output_json))).toEqual(result('one'));
   });
 
+  it('applies embedded migrations and baselines databases without a ledger', async () => {
+    const context = await fixture();
+    const first = await prepare(context);
+    const initialLedger = await sqliteRows(
+      first.database,
+      'SELECT name, hash FROM __drizzle_migrations',
+    );
+    expect(initialLedger).toEqual([{
+      name: '20260826113404_init',
+      hash: expect.stringMatching(/^[0-9a-f]{64}$/),
+    }]);
+
+    await sqliteRows(first.database, 'DROP TABLE __drizzle_migrations');
+    await expect(
+      context.runtime.status(context.outputDir, first.job_id),
+    ).resolves.toMatchObject({ job_id: first.job_id });
+    await expect(
+      sqliteRows(first.database, 'SELECT name FROM __drizzle_migrations'),
+    ).resolves.toEqual([{ name: '20260826113404_init' }]);
+  });
+
   it('does not reveal the canonical ID unless the input schema declares its key', async () => {
     const context = await fixture({
       rows: [{ row_key: 'private-id', title: 'Visible' }],

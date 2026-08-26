@@ -1,4 +1,6 @@
+import { sql } from 'drizzle-orm';
 import {
+  check,
   index,
   integer,
   primaryKey,
@@ -7,38 +9,62 @@ import {
   uniqueIndex,
 } from 'drizzle-orm/sqlite-core';
 
+const sessionStatuses = ['active', 'superseded'] as const;
+const recordStatuses = [
+  'pending',
+  'leased',
+  'running',
+  'completed',
+  'skipped_valid',
+  'skipped_invalid',
+  'failed',
+] as const;
+
 export const databaseMetadata = sqliteTable('database_metadata', {
   key: text('key').primaryKey(),
   value: text('value').notNull(),
 });
 
-export const jobs = sqliteTable('jobs', {
-  jobId: text('job_id').primaryKey(),
-  stateVersion: integer('state_version').notNull(),
-  sessionStatus: text('session_status').notNull(),
-  supersededAt: text('superseded_at'),
-  supersededByJobId: text('superseded_by_job_id'),
-  createdAt: text('created_at').notNull(),
-  updatedAt: text('updated_at').notNull(),
-  inputData: text('input_data').notNull(),
-  taskSpec: text('task_spec').notNull(),
-  outputDir: text('output_dir').notNull(),
-  idColumnKey: text('id_column_key').notNull(),
-  recordsPath: text('records_path'),
-  sourceHash: text('source_hash').notNull(),
-  taskHash: text('task_hash').notNull(),
-  executionHash: text('execution_hash').notNull(),
-  specJson: text('spec_json').notNull(),
-  settingsJson: text('settings_json').notNull(),
-  cacheDiagnosticsJson: text('cache_diagnostics_json').notNull(),
-});
+export const jobs = sqliteTable(
+  'jobs',
+  {
+    jobId: text('job_id').primaryKey(),
+    stateVersion: integer('state_version').notNull(),
+    sessionStatus: text('session_status', { enum: sessionStatuses }).notNull(),
+    supersededAt: text('superseded_at'),
+    supersededByJobId: text('superseded_by_job_id'),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+    inputData: text('input_data').notNull(),
+    taskSpec: text('task_spec').notNull(),
+    outputDir: text('output_dir').notNull(),
+    idColumnKey: text('id_column_key').notNull(),
+    recordsPath: text('records_path'),
+    sourceHash: text('source_hash').notNull(),
+    taskHash: text('task_hash').notNull(),
+    executionHash: text('execution_hash').notNull(),
+    specJson: text('spec_json').notNull(),
+    settingsJson: text('settings_json').notNull(),
+    cacheDiagnosticsJson: text('cache_diagnostics_json').notNull(),
+  },
+  table => [
+    check(
+      'jobs_session_status_check',
+      sql`${table.sessionStatus} IN ('active', 'superseded')`,
+    ),
+  ],
+);
 
-export const currentJob = sqliteTable('current_job', {
-  slot: integer('slot').primaryKey(),
-  jobId: text('job_id')
-    .notNull()
-    .references(() => jobs.jobId),
-});
+export const currentJob = sqliteTable(
+  'current_job',
+  {
+    slot: integer('slot').primaryKey(),
+    jobId: text('job_id')
+      .notNull()
+      .references(() => jobs.jobId),
+  },
+  table => [check('current_job_slot_check', sql`${table.slot} = 1`)],
+);
 
 export const results = sqliteTable(
   'results',
@@ -70,7 +96,7 @@ export const jobRecords = sqliteTable(
     recordId: text('record_id').notNull(),
     inputHash: text('input_hash').notNull(),
     inputJson: text('input_json').notNull(),
-    status: text('status').notNull(),
+    status: text('status', { enum: recordStatuses }).notNull(),
     attempts: integer('attempts').notNull().default(0),
     leaseToken: text('lease_token'),
     lastErrorJson: text('last_error_json'),
@@ -81,17 +107,16 @@ export const jobRecords = sqliteTable(
     resultId: integer('result_id').references(() => results.resultId),
   },
   table => [
+    check(
+      'job_records_status_check',
+      sql`${table.status} IN (
+        'pending', 'leased', 'running', 'completed',
+        'skipped_valid', 'skipped_invalid', 'failed'
+      )`,
+    ),
     primaryKey({ columns: [table.jobId, table.recordId] }),
     uniqueIndex('job_records_order_unique').on(table.jobId, table.inputIndex),
     uniqueIndex('job_records_lease_unique').on(table.leaseToken),
     index('job_records_queue_index').on(table.jobId, table.status, table.inputIndex),
   ],
 );
-
-export const databaseSchema = {
-  currentJob,
-  databaseMetadata,
-  jobRecords,
-  jobs,
-  results,
-};

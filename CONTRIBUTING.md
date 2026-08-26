@@ -25,6 +25,7 @@ Run the checks relevant to your change:
 
 ```bash
 pnpm lint
+pnpm db:check
 pnpm typecheck
 pnpm test
 pnpm test:bundle
@@ -76,6 +77,21 @@ Both packages use TypeScript ESM. Vite library mode produces one Node ESM bundle
 and installation templates are embedded into that bundle as raw text. Vitest is
 used for unit and integration tests.
 
+## Database migrations
+
+`packages/runtime/src/database-schema.ts` is the source of truth for tables,
+indexes, foreign keys, and check constraints. After changing it, generate and
+embed a migration:
+
+```bash
+pnpm db:generate
+```
+
+Review and commit the generated migration, snapshot, and embedded JSON manifest.
+`pnpm db:check` fails when the manifest no longer matches the migration SQL. The
+manifest lets Vite include every migration in the standalone CLI bundle without
+requiring migration files in the user's project.
+
 ## Runtime model
 
 The installed skill orchestrates the public CLI commands `prepare`, `next`,
@@ -91,7 +107,8 @@ Each assignment uses an opaque capability handle, and `submit_result` validates 
 output before committing the result and queue transition in one SQLite
 transaction. Drizzle owns the typed schema and queries, while Node's built-in
 `node:sqlite` module provides the SQLite driver without another runtime package.
-Every retry uses a fresh worker context.
+Versioned Drizzle migrations create and upgrade the database. Every retry uses a
+fresh worker context.
 
 The database stores each ID with its exact input hash, and results with both the
 input hash and task execution hash. Cache reuse requires all of them to match. The

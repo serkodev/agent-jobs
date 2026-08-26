@@ -270,9 +270,7 @@ export class AgentJobsRuntime {
     await ensureOutputLayout(destination, true);
     const databasePath = databasePathFor(destination);
     await ensureDatabaseStorage(databasePath, true);
-    const { client, close } = await openAgentJobsDatabase(databasePath, {
-      initialize: true,
-    });
+    const { client, close } = await openAgentJobsDatabase(databasePath);
     const jobId = randomUUID().replaceAll('-', '');
     const staleHandles: string[] = [];
 
