@@ -2,9 +2,26 @@
   "name": "agent-jobs",
   "type": "module",
   "version": "0.0.0-alpha.0",
-  "private": true,
   "packageManager": "pnpm@11.19.0",
-  "description": "Run resumable, schema-validated agent jobs with native Codex and Claude workers",
+  "description": "Run resumable, schema-validated batch jobs with agents",
+  "author": "SerKo",
+  "license": "MIT",
+  "homepage": "https://github.com/serkodev/agent-jobs#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/serkodev/agent-jobs.git"
+  },
+  "bugs": {
+    "url": "https://github.com/serkodev/agent-jobs/issues"
+  },
+  "keywords": [
+    "ai-agents",
+    "batch-processing",
+    "claude",
+    "cli",
+    "codex",
+    "mcp"
+  ],
   "bin": {
     "agent-jobs": "dist/agent-jobs.mjs"
   },
