@@ -70,19 +70,13 @@ try {
     `---
 name: bundle-smoke
 version: "1"
-input_schema:
-  type: object
-  properties:
+input:
+  schema:
     id: { type: string }
     title: { type: string }
-  required: [id, title]
-  additionalProperties: false
-output_schema:
-  type: object
-  properties:
+output:
+  schema:
     summary: { type: string, minLength: 1 }
-  required: [summary]
-  additionalProperties: false
 ---
 
 Return one summary string.

@@ -3,6 +3,7 @@ export * from './errors.js';
 export * from './input.js';
 export * from './mcp-server.js';
 export * from './numbers.js';
+export * from './schema.js';
 export * from './spec.js';
 export * from './state.js';
 export * from './storage.js';

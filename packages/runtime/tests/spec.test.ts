@@ -1,58 +1,60 @@
-import type { JsonSchema } from '../src/spec.js';
+import type { FieldSchema, RecordSchema } from '../src/schema.js';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-
 import { join } from 'node:path';
+
 import { afterEach, describe, expect, it } from 'vitest';
-
 import { stringify as stringifyYaml } from 'yaml';
-import {
 
-  loadSpec,
-  validationErrors,
-} from '../src/spec.js';
+import {
+  fieldValidationErrors,
+  recordValidationErrors,
+} from '../src/schema.js';
+import { loadSpec } from '../src/spec.js';
 import { parseStrictJson, stringifyStrictJson } from '../src/storage.js';
 
 const roots: string[] = [];
 
-const defaultInput: JsonSchema = {
-  type: 'object',
-  properties: {
-    id: { type: ['string', 'integer'] },
-    title: { type: 'string', minLength: 1 },
-    optional: { type: 'string' },
-  },
-  required: ['id', 'title'],
-  additionalProperties: false,
+const defaultInput: RecordSchema = {
+  id: { type: ['string', 'integer'] },
+  title: { type: 'string', minLength: 1 },
+  optional: { type: 'string', optional: true },
 };
-const defaultOutput: JsonSchema = {
-  type: 'object',
-  properties: {
-    summary: { type: 'string', minLength: 1 },
-    vote: { type: 'string', enum: ['accept', 'reject'] },
-  },
-  required: ['summary', 'vote'],
-  additionalProperties: false,
+const defaultOutput: RecordSchema = {
+  summary: { type: 'string', minLength: 1 },
+  vote: { type: 'string', enum: ['accept', 'reject'] },
 };
 
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map(root => rm(root, { force: true, recursive: true })));
+  await Promise.all(
+    roots.splice(0).map(root => rm(root, { force: true, recursive: true })),
+  );
 });
 
 async function writeSpec(options: {
   name?: string;
+  omitName?: boolean;
+  fileName?: string;
   body?: string;
-  inputSchema?: JsonSchema;
-  outputSchema?: JsonSchema;
+  inputFields?: Record<string, unknown>;
+  inputLoose?: boolean;
+  outputFields?: Record<string, unknown>;
+  outputLoose?: boolean;
   extra?: Record<string, unknown>;
 } = {}): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'batch-spec-test-'));
   roots.push(root);
-  const path = join(root, 'task.md');
+  const path = join(root, options.fileName ?? 'task.md');
   const metadata = {
-    name: options.name ?? 'review',
-    input_schema: options.inputSchema ?? defaultInput,
-    output_schema: options.outputSchema ?? defaultOutput,
+    ...(options.omitName ? {} : { name: options.name ?? 'review' }),
+    input: {
+      ...(options.inputLoose === undefined ? {} : { loose: options.inputLoose }),
+      schema: options.inputFields ?? defaultInput,
+    },
+    output: {
+      ...(options.outputLoose === undefined ? {} : { loose: options.outputLoose }),
+      schema: options.outputFields ?? defaultOutput,
+    },
     ...options.extra,
   };
   await writeFile(
@@ -64,6 +66,51 @@ async function writeSpec(options: {
 }
 
 describe('task specification loading', () => {
+  it('defaults omitted name and version from the spec filename', async () => {
+    const path = await writeSpec({
+      fileName: 'summarize-article.md',
+      omitName: true,
+    });
+    const spec = await loadSpec(path);
+
+    expect(spec.name).toBe('summarize-article');
+    expect(spec.version).toBe('1');
+    expect(spec.workerPayload()).toMatchObject({
+      name: 'summarize-article',
+      version: '1',
+    });
+  });
+
+  it('prefers an explicit valid name over the filename', async () => {
+    const spec = await loadSpec(await writeSpec({
+      fileName: '.md',
+      name: 'explicit-name',
+    }));
+    expect(spec.name).toBe('explicit-name');
+
+    await expect(loadSpec(await writeSpec({
+      name: '   ',
+    }))).rejects.toMatchObject({ code: 'invalid_spec' });
+  });
+
+  it('removes only the final extension when deriving name', async () => {
+    const spec = await loadSpec(await writeSpec({
+      fileName: 'review.task.md',
+      omitName: true,
+    }));
+    expect(spec.name).toBe('review.task');
+  });
+
+  it('rejects a missing name when the filename cannot provide one', async () => {
+    await expect(loadSpec(await writeSpec({
+      fileName: '.md',
+      omitName: true,
+    }))).rejects.toMatchObject({
+      code: 'invalid_spec',
+      message: 'Task spec name could not be derived from its filename',
+    });
+  });
+
   it('parses frontmatter, defaults, body, and worker payload', async () => {
     const path = await writeSpec({
       body: '# Instructions\n\nReturn an answer in Traditional Chinese.',
@@ -84,13 +131,18 @@ describe('task specification loading', () => {
       reasoningEffort: 'high',
     });
     expect(spec.instructions).toContain('Traditional Chinese');
-    expect(spec.inputSchema.required).toEqual(['id', 'title']);
+    expect(spec.input).toEqual({ loose: false, schema: defaultInput });
+    expect(spec.inputValidation).toMatchObject({
+      id: { optional: false },
+      title: { optional: false },
+      optional: { optional: true },
+    });
     expect(spec.workerPayload()).toEqual({
       name: 'review',
       version: '2',
       description: 'A focused review.',
       instructions: spec.instructions,
-      output_schema: defaultOutput,
+      output: { loose: false, schema: defaultOutput },
     });
   });
 
@@ -115,419 +167,371 @@ describe('task specification loading', () => {
     expect(overridden.reasoningEffort).toBe('low');
 
     const cleared = await loadSpec(
-      await writeSpec({ extra: { defaults: { model: 'small' }, model: null } }),
+      await writeSpec({
+        extra: { defaults: { model: 'small' }, model: null },
+      }),
     );
     expect(cleared.model).toBeNull();
   });
 
-  it('preserves large YAML integer metadata exactly', async () => {
-    const spec = await loadSpec(await writeSpec({ extra: { version: 9223372036854775807n } }));
-    expect(spec.version).toBe('9223372036854775807');
+  it('defaults an omitted input to a fully loose record', async () => {
+    const parsed = await loadSpec(await rawSpec(`---
+name: prompt-validated-input
+output:
+  schema: {}
+---
+Validate the input in the task instructions.
+`));
+
+    expect(parsed.input).toEqual({ loose: true, schema: {} });
+    expect(parsed.inputValidation).toEqual({});
   });
 
-  it('preserves arbitrary-precision YAML schema numbers exactly', async () => {
+  it('preserves large YAML integers and arbitrary-precision decimal bounds', async () => {
     const path = await rawSpec(`---
 name: precise-schema
-input_schema:
-  type: object
-  properties:
+version: 9223372036854775807
+input:
+  schema:
     score:
       type: number
       minimum: 0.100000000000000000001
-  required: [score]
-output_schema:
-  type: object
-  properties: {}
+output:
+  schema: {}
 ---
 Validate the score.
 `);
     const spec = await loadSpec(path);
-    const score = (spec.inputSchema.properties as Record<string, JsonSchema>)
-      .score!;
+    const score = spec.inputValidation.score!.schema;
+    expect(spec.version).toBe('9223372036854775807');
     expect(stringifyStrictJson(score.minimum)).toBe('0.100000000000000000001');
-    expect(
-      validationErrors(
-        { score: parseStrictJson('0.100000000000000000000') },
-        spec.inputSchema,
-      ),
-    ).toEqual([expect.objectContaining({ path: '/score', validator: 'minimum' })]);
+    expect(recordValidationErrors(
+      { score: parseStrictJson('0.100000000000000000000') },
+      spec.input,
+      spec.inputValidation,
+    )).toEqual([
+      expect.objectContaining({ path: '/score', validator: 'minimum' }),
+    ]);
   });
 
-  it('rejects missing, unclosed, non-object, and empty frontmatter/body', async () => {
-    const missing = await rawSpec('# Just prose\n');
-    await expect(loadSpec(missing)).rejects.toMatchObject({ code: 'invalid_spec' });
-    const unclosed = await rawSpec('---\nname: broken\n');
-    await expect(loadSpec(unclosed)).rejects.toMatchObject({ code: 'invalid_spec' });
-    const scalar = await rawSpec('---\n- not\n- an-object\n---\nTask.\n');
-    await expect(loadSpec(scalar)).rejects.toMatchObject({ code: 'invalid_spec' });
-    const emptyBody = await writeSpec({ body: '   ' });
-    await expect(loadSpec(emptyBody)).rejects.toMatchObject({ code: 'invalid_spec' });
-    const invalidYaml = await rawSpec('---\nname: [unterminated\n---\nTask.\n');
-    await expect(loadSpec(invalidYaml)).rejects.toMatchObject({ code: 'invalid_spec' });
-  });
-
-  it('rejects an explicitly null version', async () => {
-    await expect(loadSpec(await writeSpec({ extra: { version: null } }))).rejects.toMatchObject({
-      code: 'invalid_spec',
-    });
-  });
-
-  it('reports missing required root keys deterministically', async () => {
-    const path = await rawSpec(
-      '---\nname: incomplete\ninput_schema:\n  type: object\n---\nTask.\n',
-    );
-    await expect(loadSpec(path)).rejects.toMatchObject({
-      code: 'invalid_spec',
-      details: { missing: ['output_schema'] },
-    });
-  });
-
-  it.each(['input_schema', 'output_schema'])(
-    'rejects an invalid %s JSON Schema',
-    async (schemaKey) => {
-      const metadata: Record<string, unknown> = {
-        name: 'invalid',
-        input_schema: defaultInput,
-        output_schema: defaultOutput,
-      };
-      metadata[schemaKey] = { type: 'definitely-not-a-json-schema-type' };
-      const path = await rawSpec(
-        `---\n${stringifyYaml(metadata).trimEnd()}\n---\nTask.\n`,
-      );
+  it('rejects malformed frontmatter and an empty instruction body', async () => {
+    const cases = [
+      await rawSpec('# Just prose\n'),
+      await rawSpec('---\nname: broken\n'),
+      await rawSpec('---\n- not\n- an-object\n---\nTask.\n'),
+      await rawSpec('---\nname: [unterminated\n---\nTask.\n'),
+      await writeSpec({ body: '   ' }),
+    ];
+    for (const path of cases)
       await expect(loadSpec(path)).rejects.toMatchObject({ code: 'invalid_spec' });
-    },
-  );
-
-  it('requires v1 object roots and input properties', async () => {
-    await expect(
-      loadSpec(await writeSpec({ inputSchema: { type: 'array' } })),
-    ).rejects.toMatchObject({ code: 'invalid_spec' });
-    await expect(
-      loadSpec(await writeSpec({ inputSchema: { type: 'object' } })),
-    ).rejects.toMatchObject({ code: 'invalid_spec' });
   });
 
-  it('rejects unresolved local and external references before row validation', async () => {
-    for (const reference of ['#/missing', 'https://example.invalid/schema.json']) {
+  it('rejects missing roots, null versions, and unknown config keys', async () => {
+    await expect(loadSpec(await rawSpec(
+      '---\nname: incomplete\ninput:\n  schema: {}\n---\nTask.\n',
+    ))).rejects.toMatchObject({
+      code: 'invalid_spec',
+      details: { missing: ['output'] },
+    });
+    await expect(loadSpec(await writeSpec({
+      extra: { version: null },
+    }))).rejects.toMatchObject({ code: 'invalid_spec' });
+    await expect(loadSpec(await writeSpec({
+      extra: { retired: true },
+    }))).rejects.toMatchObject({ code: 'invalid_spec' });
+    await expect(loadSpec(await writeSpec({
+      extra: { input: { schema: defaultInput, retired: true } },
+    }))).rejects.toMatchObject({ code: 'invalid_spec' });
+  });
+
+  it('defaults loose to false and accepts explicit loose records', async () => {
+    const parsed = await loadSpec(await writeSpec({
+      inputLoose: true,
+      outputLoose: true,
+    }));
+    expect(parsed.input).toEqual({ loose: true, schema: defaultInput });
+    expect(parsed.output).toEqual({ loose: true, schema: defaultOutput });
+    expect(recordValidationErrors(
+      { extra: true },
+      parsed.input,
+      parsed.inputValidation,
+    )).toEqual([
+      expect.objectContaining({ path: '/id', validator: 'required' }),
+      expect.objectContaining({ path: '/title', validator: 'required' }),
+    ]);
+
+    await expect(loadSpec(await writeSpec({
+      extra: {
+        input: { loose: 'yes', schema: defaultInput },
+      },
+    }))).rejects.toMatchObject({ code: 'invalid_spec' });
+    await expect(loadSpec(await rawSpec(`---
+name: missing-schema
+input: {}
+output:
+  schema: {}
+---
+Task.
+`))).rejects.toMatchObject({ code: 'invalid_spec' });
+  });
+
+  it('normalizes scalar type shorthand for fields, properties, and items', async () => {
+    const spec = await loadSpec(await rawSpec(`---
+name: shorthand
+input:
+  schema:
+    id: string
+    profile:
+      type: object
+      properties:
+        name: string
+    scores:
+      type: array
+      items: integer
+output:
+  schema:
+    summary: string
+---
+Use shorthand.
+`));
+
+    expect(spec.input.schema).toEqual({
+      id: { type: 'string' },
+      profile: {
+        type: 'object',
+        properties: { name: { type: 'string' } },
+      },
+      scores: {
+        type: 'array',
+        items: { type: 'integer' },
+      },
+    });
+    expect(spec.output.schema).toEqual({
+      summary: { type: 'string' },
+    });
+  });
+
+  it('rejects unknown shorthand types and incompatible DSL keys', async () => {
+    const invalidFields: Array<Record<string, unknown>> = [
+      { title: 'not-a-type' },
+      { title: { optional: true } },
+      { title: { type: 'not-a-type' } },
+      { title: { type: 'string', required: true } },
+      { title: { type: 'string', retired: true } },
+      { title: { type: 'string', minimum: 1 } },
+      { score: { type: 'number', multipleOf: 0 } },
+      { items: { type: 'array', items: { type: 'string', optional: true } } },
+      { value: { type: ['string', 'string'] } },
+    ];
+    for (const inputFields of invalidFields) {
       await expect(
-        loadSpec(
-          await writeSpec({
-            outputSchema: { type: 'object', $ref: reference },
-          }),
-        ),
-      ).rejects.toMatchObject({
-        code: 'invalid_schema_reference',
-        details: { schema: 'output_schema' },
-      });
+        loadSpec(await writeSpec({ inputFields })),
+      ).rejects.toMatchObject({ code: 'invalid_spec' });
     }
   });
 
-  it('accepts resolvable local references in the same schema', async () => {
-    const schema = {
-      type: 'object',
-      $defs: {
-        result: {
+  it('expands nested fields and applies loose consistently at every object level', async () => {
+    const strict = await loadSpec(await writeSpec({
+      inputFields: {
+        profile: {
           type: 'object',
-          properties: { value: { type: 'string' } },
-          required: ['value'],
+          properties: {
+            name: { type: 'string' },
+            nickname: { type: 'string', optional: true },
+          },
         },
       },
-      $ref: '#/$defs/result',
-    } satisfies JsonSchema;
-    const parsed = await loadSpec(await writeSpec({ outputSchema: schema }));
-    expect(parsed.outputSchema.$ref).toBe('#/$defs/result');
-    expect(validationErrors({ value: 'ok' }, parsed.outputSchema)).toEqual([]);
+    }));
+    expect(recordValidationErrors(
+      {},
+      strict.input,
+      strict.inputValidation,
+    )).toEqual([
+      expect.objectContaining({ path: '/profile', validator: 'required' }),
+    ]);
+    expect(recordValidationErrors(
+      { profile: {} },
+      strict.input,
+      strict.inputValidation,
+    )).toEqual([
+      expect.objectContaining({ path: '/profile/name', validator: 'required' }),
+    ]);
+    expect(recordValidationErrors(
+      { profile: { name: 'Ada', unknown: true } },
+      strict.input,
+      strict.inputValidation,
+    )).toEqual([
+      expect.objectContaining({ path: '/profile/unknown', validator: 'loose' }),
+    ]);
+
+    const loose = await loadSpec(await writeSpec({
+      inputFields: {
+        profile: { type: 'object', loose: true },
+      },
+    }));
+    expect(recordValidationErrors(
+      { profile: { any: 'JSON value' } },
+      loose.input,
+      loose.inputValidation,
+    )).toEqual([]);
   });
 
-  it('preserves literal __proto__ and const property names in YAML schemas', async () => {
+  it('preserves literal __proto__ field names without prototype mutation', async () => {
     const path = await rawSpec(`---
 name: safe-keys
-input_schema:
-  type: object
-  additionalProperties: false
-  required:
-    - __proto__
-  properties:
+input:
+  schema:
     __proto__:
       type: string
-    const:
+    constructor:
       type: string
-output_schema:
-  type: object
-  properties: {}
+      optional: true
+output:
+  schema: {}
 ---
 Task.
 `);
     const parsed = await loadSpec(path);
-    const properties = parsed.inputSchema.properties as Record<string, unknown>;
-    expect(Object.hasOwn(properties, '__proto__')).toBe(true);
-    expect(Object.hasOwn(properties, 'const')).toBe(true);
-    expect(properties.injected).toBeUndefined();
-    expect(Object.getPrototypeOf(properties)).toBeNull();
+    expect(Object.hasOwn(parsed.inputValidation, '__proto__')).toBe(true);
+    expect(Object.hasOwn(parsed.inputValidation, 'constructor')).toBe(true);
+    expect(Object.getPrototypeOf(parsed.inputValidation)).toBeNull();
     const row = Object.create(null) as Record<string, unknown>;
     Object.defineProperty(row, '__proto__', {
       enumerable: true,
       value: 'literal',
     });
-    expect(validationErrors(row, parsed.inputSchema)).toEqual([]);
-    row.injected = true;
-    expect(validationErrors(row, parsed.inputSchema)).toEqual([
-      expect.objectContaining({ validator: 'additionalProperties' }),
-    ]);
+    expect(recordValidationErrors(
+      row,
+      parsed.input,
+      parsed.inputValidation,
+    )).toEqual([]);
   });
 });
 
-describe('jSON Schema validation', () => {
-  it('leaves blank/null/extra-property semantics entirely to schema', () => {
-    const permissive = {
-      type: 'object',
-      properties: { title: { type: ['string', 'null'] } },
-      required: ['title'],
-      additionalProperties: false,
-    } satisfies JsonSchema;
-    expect(validationErrors({ title: '' }, permissive)).toEqual([]);
-    expect(validationErrors({ title: null }, permissive)).toEqual([]);
-    expect(validationErrors({ title: '', extra: true }, permissive)).toEqual([
-      expect.objectContaining({ path: '', validator: 'additionalProperties' }),
-    ]);
+describe('field schema DSL validation', () => {
+  it.each([
+    ['string', 'text'],
+    ['boolean', true],
+    ['null', null],
+    ['array', []],
+    ['object', {}],
+    ['integer', 42],
+    ['integer', 9223372036854775807n],
+    ['number', parseStrictJson('1.25')],
+    ['number', 9223372036854775807n],
+  ] as const)('supports %s values including exact integer/float representations', (type, value) => {
+    expect(fieldValidationErrors(value, {
+      type,
+      ...(type === 'object' ? { loose: true } : {}),
+    })).toEqual([]);
   });
 
-  it('returns deterministic path, message, and validator diagnostics', () => {
-    const schema = {
+  it('keeps integer, number, null, and union semantics explicit', () => {
+    expect(fieldValidationErrors(1.5, { type: 'integer' })).toEqual([
+      expect.objectContaining({ validator: 'type' }),
+    ]);
+    expect(fieldValidationErrors(1, { type: 'number' })).toEqual([]);
+    expect(fieldValidationErrors(null, {
+      type: ['string', 'null'],
+      minLength: 1,
+    })).toEqual([]);
+    expect(fieldValidationErrors('', {
+      type: ['string', 'null'],
+      minLength: 1,
+    })).toEqual([expect.objectContaining({ validator: 'minLength' })]);
+  });
+
+  it('validates strings, arrays, and nested objects with deterministic paths', () => {
+    const schema: FieldSchema = {
       type: 'object',
       properties: {
-        contact: { type: 'string', format: 'email' },
-        vote: { type: 'string', enum: ['accept', 'reject'] },
-        nested: {
-          type: 'object',
-          properties: { score: { type: 'integer' } },
-          required: ['score'],
+        tags: {
+          type: 'array',
+          minItems: 2,
+          uniqueItems: true,
+          items: { type: 'string', minLength: 2 },
         },
       },
-      required: ['contact', 'vote', 'nested'],
-    } satisfies JsonSchema;
-    const errors = validationErrors(
-      { contact: 'not-an-email', vote: 'maybe', nested: { score: 1.5 } },
-      schema,
-    );
-    expect(errors.map(error => [error.path, error.validator])).toEqual([
-      ['/contact', 'format'],
-      ['/nested/score', 'type'],
-      ['/vote', 'enum'],
+    };
+    expect(fieldValidationErrors({ tags: ['x', 'x'] }, schema)).toEqual([
+      expect.objectContaining({ path: '/tags', validator: 'uniqueItems' }),
+      expect.objectContaining({ path: '/tags/0', validator: 'minLength' }),
+      expect.objectContaining({ path: '/tags/1', validator: 'minLength' }),
     ]);
-    expect(errors.every(error => error.message.length > 0)).toBe(true);
+    expect(fieldValidationErrors({ tags: [] }, schema)).toEqual([
+      expect.objectContaining({ path: '/tags', validator: 'minItems' }),
+    ]);
   });
 
-  it('treats retained bigint values as JSON Schema integers', () => {
-    const schema = { type: 'integer' } satisfies JsonSchema;
-    expect(validationErrors(9223372036854775807n, schema)).toEqual([]);
-  });
-
-  it('compares adjacent bigint const and enum values without Number rounding', () => {
-    const exactConst = {
+  it('compares bigint enum and numeric constraints without Number rounding', () => {
+    const schema: FieldSchema = {
       type: 'integer',
-      const: 9007199254740993n,
-    } satisfies JsonSchema;
-    expect(validationErrors(9007199254740993n, exactConst)).toEqual([]);
-    expect(validationErrors(9007199254740992n, exactConst)).toEqual([
-      expect.objectContaining({ path: '', validator: 'const' }),
-    ]);
-
-    const exactEnum = {
       enum: [9007199254740993n, 9007199254740994n],
-    } satisfies JsonSchema;
-    expect(validationErrors(9007199254740994n, exactEnum)).toEqual([]);
-    expect(validationErrors(9007199254740992n, exactEnum)).toEqual([
+      minimum: 9007199254740993n,
+      maximum: 9007199254740994n,
+      multipleOf: 2n,
+    };
+    expect(fieldValidationErrors(9007199254740994n, schema)).toEqual([]);
+    expect(fieldValidationErrors(9007199254740992n, schema)).toEqual([
       expect.objectContaining({ validator: 'enum' }),
+      expect.objectContaining({ validator: 'minimum' }),
+    ]);
+    expect(fieldValidationErrors(9007199254740993n, schema)).toEqual([
+      expect.objectContaining({ validator: 'multipleOf' }),
     ]);
   });
 
-  it('evaluates bigint bounds and multipleOf exactly at adjacent values', () => {
-    expect(
-      validationErrors(9007199254740992n, {
-        type: 'integer',
-        minimum: 9007199254740993n,
-      }),
-    ).toEqual([expect.objectContaining({ validator: 'minimum' })]);
-    expect(
-      validationErrors(9007199254740993n, {
-        type: 'integer',
-        minimum: 9007199254740993n,
-        maximum: 9007199254740993n,
-      }),
-    ).toEqual([]);
-    expect(
-      validationErrors(9007199254740994n, {
-        exclusiveMaximum: 9007199254740994n,
-      }),
-    ).toEqual([expect.objectContaining({ validator: 'exclusiveMaximum' })]);
-    expect(
-      validationErrors(9007199254740993n, { multipleOf: 2n }),
-    ).toEqual([expect.objectContaining({ validator: 'multipleOf' })]);
-    expect(validationErrors(9007199254740994n, { multipleOf: 2n })).toEqual([]);
-  });
-
-  it('validates arbitrary-precision decimals without Number rounding', () => {
+  it('validates arbitrary-precision decimal boundaries and multiples', () => {
     const below = parseStrictJson('0.100000000000000000000');
     const exact = parseStrictJson('0.100000000000000000001');
     const above = parseStrictJson('0.100000000000000000002');
-    const schema = {
+    const schema: FieldSchema = {
       type: 'number',
       minimum: exact,
       maximum: exact,
       multipleOf: exact,
-    } satisfies JsonSchema;
-
-    expect(validationErrors(exact, schema)).toEqual([]);
-    expect(validationErrors(below, schema)).toEqual([
+    };
+    expect(fieldValidationErrors(exact, schema)).toEqual([]);
+    expect(fieldValidationErrors(below, schema)).toEqual([
       expect.objectContaining({ validator: 'minimum' }),
       expect.objectContaining({ validator: 'multipleOf' }),
     ]);
-    expect(validationErrors(above, schema)).toEqual([
+    expect(fieldValidationErrors(above, schema)).toEqual([
       expect.objectContaining({ validator: 'maximum' }),
       expect.objectContaining({ validator: 'multipleOf' }),
     ]);
-    expect(
-      validationErrors(parseStrictJson('9007199254740993.0'), {
-        type: 'integer',
-      }),
-    ).toEqual([]);
+    expect(fieldValidationErrors(parseStrictJson('9007199254740993.0'), {
+      type: 'integer',
+    })).toEqual([]);
   });
 
-  it('preserves exact bigint semantics through local refs and combinators', () => {
-    const schema = {
-      $defs: {
-        exact: { const: 9007199254740993n },
+  it('uses exact nested equality for enum and uniqueItems', () => {
+    expect(fieldValidationErrors(
+      { result: 9007199254740993n },
+      {
+        type: 'object',
+        loose: true,
+        enum: [{ result: 9007199254740993n }],
       },
-      allOf: [
-        { type: 'integer' },
-        {
-          anyOf: [
-            { $ref: '#/$defs/exact' },
-            { const: 9007199254740995n },
-          ],
-        },
-        { not: { const: 9007199254740994n } },
-      ],
-    } satisfies JsonSchema;
-    expect(validationErrors(9007199254740993n, schema)).toEqual([]);
-    expect(validationErrors(9007199254740992n, schema)).not.toEqual([]);
-    expect(validationErrors(9007199254740994n, schema)).not.toEqual([]);
+    )).toEqual([]);
+    expect(fieldValidationErrors(
+      [9007199254740992n, 9007199254740993n],
+      { type: 'array', uniqueItems: true },
+    )).toEqual([]);
+    expect(fieldValidationErrors(
+      [9007199254740993n, 9007199254740993n],
+      { type: 'array', uniqueItems: true },
+    )).toEqual([expect.objectContaining({ validator: 'uniqueItems' })]);
   });
 
-  it('uses exact nested equality and uniqueItems for bigint-containing values', () => {
-    expect(
-      validationErrors(
-        { result: 9007199254740993n },
-        { const: { result: 9007199254740993n } },
-      ),
-    ).toEqual([]);
-    expect(
-      validationErrors(
-        { result: 9007199254740992n },
-        { const: { result: 9007199254740993n } },
-      ),
-    ).toEqual([expect.objectContaining({ validator: 'const' })]);
-    expect(
-      validationErrors(
-        [9007199254740992n, 9007199254740993n],
-        { type: 'array', uniqueItems: true },
-      ),
-    ).toEqual([]);
-    expect(
-      validationErrors(
-        [9007199254740993n, 9007199254740993n],
-        { type: 'array', uniqueItems: true },
-      ),
-    ).toEqual([expect.objectContaining({ validator: 'uniqueItems' })]);
-  });
-
-  it('keeps propertyNames const and enum validation on AJV\'s synthetic key data', () => {
-    expect(
-      validationErrors(
-        { foo: 1 },
-        { type: 'object', propertyNames: { const: 'foo' } },
-      ),
-    ).toEqual([]);
-    expect(
-      validationErrors(
-        { foo: 1 },
-        { type: 'object', propertyNames: { enum: ['foo', 'bar'] } },
-      ),
-    ).toEqual([]);
-    expect(
-      validationErrors(
-        { nope: 1 },
-        { type: 'object', propertyNames: { const: 'foo' } },
-      ),
-    ).not.toEqual([]);
-  });
-
-  it('validates a patternProperties regex literally named __proto__', () => {
-    const patterns = Object.fromEntries([
-      ['__proto__', { type: 'string' }],
-    ]);
-    const schema = {
-      type: 'object',
-      patternProperties: patterns,
-      additionalProperties: false,
-    } satisfies JsonSchema;
-    expect(validationErrors(JSON.parse('{"__proto__":"x"}'), schema)).toEqual([]);
-    expect(
-      validationErrors(JSON.parse('{"__proto__":42}'), schema),
-    ).toEqual([expect.objectContaining({ path: '/__proto__', validator: 'type' })]);
-  });
-
-  it('honors __proto__ keys in required and dependency maps', () => {
-    const properties = Object.fromEntries([
-      ['__proto__', { type: 'string' }],
-      ['other', { type: 'string' }],
-    ]);
-    const dependentSchemas = Object.fromEntries([
-      ['__proto__', { required: ['other'] }],
-    ]);
-    const dependentRequired = Object.fromEntries([
-      ['__proto__', ['other']],
-    ]);
-    const schema = {
-      type: 'object',
-      properties,
-      required: ['__proto__'],
-      dependentSchemas,
-      dependentRequired,
-      additionalProperties: false,
-    } satisfies JsonSchema;
-    expect(validationErrors(JSON.parse('{"__proto__":"x"}'), schema)).not.toEqual([]);
-    expect(
-      validationErrors(
-        JSON.parse('{"__proto__":"x","other":"ok"}'),
-        schema,
-      ),
-    ).toEqual([]);
-  });
-
-  it('fails deterministically for already-rounded unsafe Number values', () => {
-    expect(() =>
-      validationErrors(9007199254740992, { type: 'integer' }),
-    ).toThrowError(expect.objectContaining({ code: 'inexact_number' }));
-    expect(() =>
-      validationErrors(1n, { const: 9007199254740992 }),
-    ).toThrowError(expect.objectContaining({ code: 'inexact_numeric_schema' }));
-  });
-
-  it.each(['#/missing', 'urn:missing-schema'])(
-    'maps unresolved references to a domain error (%s)',
-    (reference) => {
-      expect(() => validationErrors({}, { type: 'object', $ref: reference })).toThrowError(
-        expect.objectContaining({ code: 'invalid_schema_reference' }),
-      );
-    },
-  );
-
-  it('maps a cyclic root reference to a domain error', () => {
-    expect(() => validationErrors({}, { type: 'object', $ref: '#' })).toThrowError(
-      expect.objectContaining({ code: 'invalid_schema_reference' }),
-    );
+  it('rejects already-rounded unsafe JavaScript numbers', () => {
+    expect(() => fieldValidationErrors(9007199254740992, {
+      type: 'integer',
+    })).toThrowError(expect.objectContaining({ code: 'inexact_number' }));
+    expect(() => fieldValidationErrors(1n, {
+      type: 'integer',
+      enum: [9007199254740992],
+    })).toThrowError(expect.objectContaining({ code: 'inexact_numeric_schema' }));
   });
 });
 

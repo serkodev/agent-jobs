@@ -66,7 +66,7 @@ pnpm agent-jobs uninstall playground --yes
 The pnpm workspace contains two packages:
 
 - The root `agent-jobs` package owns the installer, host templates, and public CLI.
-- `packages/runtime` owns input parsing, JSON Schema validation, persistent batch
+- `packages/runtime` owns input parsing, field-DSL validation, persistent batch
   state, assignment handling, and the MCP server.
 
 The dependency direction is intentionally one-way: the installer may depend on the

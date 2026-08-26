@@ -1,8 +1,14 @@
 /** SQLite-backed batch queue and capability-based worker protocol. */
 
 import type { DatabaseSync } from 'node:sqlite';
+import type { GenericSchema } from 'valibot';
 import type { AgentJobsDatabase } from './database.js';
-import type { TaskSpec, ValidationDiagnostic } from './spec.js';
+import type {
+  RecordSchemaConfig,
+  RecordValidationSchema,
+  ValidationDiagnostic,
+} from './schema.js';
+import type { TaskSpec } from './spec.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { lstat, mkdir, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -10,6 +16,7 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
+import * as v from 'valibot';
 
 import { currentJob, jobRecords, jobs, results } from './database-schema.js';
 import {
@@ -20,7 +27,16 @@ import {
 import { AgentJobsError } from './errors.js';
 import { canonicalizeId, loadRecords } from './input.js';
 import { isPreciseNumber } from './numbers.js';
-import { loadSpec, validationErrors } from './spec.js';
+import {
+  nonBlankStringSchema,
+  recordSchemaConfigSchema,
+  valibotDiagnostics,
+} from './schema-validation.js';
+import {
+  compileRecordSchema,
+  recordValidationErrors,
+} from './schema.js';
+import { loadSpec } from './spec.js';
 import {
   atomicWriteJson,
   atomicWriteText,
@@ -30,7 +46,7 @@ import {
   stringifyStrictJson,
 } from './storage.js';
 
-export const STATE_VERSION = 2;
+export const STATE_VERSION = 1;
 const DATABASE_FILENAME = 'agent-jobs.sqlite';
 const HANDLE_PREFIX = 'aj_';
 const HANDLE_PATTERN = /^aj_[\w-]{32,}$/;
@@ -63,7 +79,6 @@ export type RecordStatus
     | 'failed';
 
 type JsonObject = Record<string, unknown>;
-type JsonSchema = Record<string, unknown>;
 type JobRow = typeof jobs.$inferSelect;
 type JobRecordRow = typeof jobRecords.$inferSelect;
 type ResultRow = typeof results.$inferSelect;
@@ -117,29 +132,68 @@ interface PreparedRecord {
   inputHash: string;
 }
 
-interface SerializedSpec extends JsonObject {
+interface SerializedSpec {
   name: string;
   version: string;
   description: string | null;
   instructions: string;
-  input_schema: JsonSchema;
-  output_schema: JsonSchema;
+  input: RecordSchemaConfig;
+  output: RecordSchemaConfig;
   output_field_order: string[];
 }
 
 interface ParsedJob {
   row: JobRow;
   spec: SerializedSpec;
+  inputValidation: RecordValidationSchema;
+  outputValidation: RecordValidationSchema;
   settings: ResolvedSettings;
 }
 
-interface RegistryEntry extends JsonObject {
+interface RegistryEntry {
   state_version: number;
   database_path: string;
   job_id: string;
   record_index: number;
   handle: string;
 }
+
+const serializedSpecSchema: GenericSchema<unknown, SerializedSpec> = v.pipe(
+  v.strictObject({
+    name: nonBlankStringSchema,
+    version: v.string(),
+    description: v.nullable(v.string()),
+    instructions: nonBlankStringSchema,
+    input: recordSchemaConfigSchema,
+    output: recordSchemaConfigSchema,
+    output_field_order: v.array(v.string()),
+  }),
+  v.check(
+    spec => listsObjectKeys(spec.output_field_order, spec.output.schema),
+    'Output field order does not match the output schema',
+  ),
+);
+
+const resolvedSettingsSchema: GenericSchema<unknown, ResolvedSettings>
+  = v.strictObject({
+    model: v.nullable(nonBlankStringSchema),
+    reasoning_effort: v.nullable(nonBlankStringSchema),
+    max_concurrency: v.nullable(v.pipe(v.number(), v.integer(), v.minValue(1))),
+    max_retries: v.pipe(v.number(), v.integer(), v.minValue(0)),
+    retry_invalid: v.boolean(),
+    on_error: v.picklist(['stop', 'continue_successes']),
+    collect_format: v.picklist(['none', 'json', 'jsonl', 'csv']),
+    post_process_model: v.nullable(nonBlankStringSchema),
+    post_process_reasoning_effort: v.nullable(nonBlankStringSchema),
+  });
+
+const registryEntrySchema: GenericSchema<unknown, RegistryEntry> = v.strictObject({
+  state_version: v.literal(STATE_VERSION),
+  database_path: nonBlankStringSchema,
+  job_id: v.pipe(v.string(), v.regex(JOB_ID_PATTERN)),
+  record_index: v.pipe(v.number(), v.integer(), v.minValue(0)),
+  handle: v.pipe(v.string(), v.regex(HANDLE_PATTERN)),
+});
 
 interface SupersededSession {
   jobId: string;
@@ -348,7 +402,8 @@ export class AgentJobsRuntime {
           if (cachedResult !== undefined) {
             cacheErrors = validateStoredResult(
               cachedResult,
-              serializedSpec.output_schema,
+              spec.output,
+              spec.outputValidation,
             );
             if (cacheErrors.length === 0) {
               status = 'skipped_valid';
@@ -575,14 +630,18 @@ export class AgentJobsRuntime {
             eq(jobRecords.leaseToken, handle),
           ));
         const payload: JsonObject = {
-          input: parseStoredInput(record, job.spec.input_schema),
+          input: parseStoredInput(
+            record,
+            job.spec.input,
+            job.inputValidation,
+          ),
           task_spec: {
             name: job.spec.name,
             version: job.spec.version,
             description: job.spec.description,
             instructions: job.spec.instructions,
-            input_schema: job.spec.input_schema,
-            output_schema: job.spec.output_schema,
+            input: job.spec.input,
+            output: job.spec.output,
           },
           attempt: record.attempts,
           model: job.settings.model,
@@ -590,7 +649,7 @@ export class AgentJobsRuntime {
         };
         if (
           Object.hasOwn(
-            schemaProperties(job.spec.input_schema),
+            job.spec.input.schema,
             job.row.idColumnKey,
           )
         ) {
@@ -641,11 +700,15 @@ export class AgentJobsRuntime {
               'This assignment handle cannot submit a result',
             );
           }
-          const errors = validationErrors(result, job.spec.output_schema);
+          const errors = recordValidationErrors(
+            result,
+            job.spec.output,
+            job.outputValidation,
+          );
           if (errors.length > 0) {
             throw new AgentJobsError(
               'output_validation_failed',
-              'Worker result does not satisfy output_schema',
+              'Worker result does not satisfy the output schema',
               errors,
             );
           }
@@ -890,7 +953,6 @@ export class AgentJobsRuntime {
         selectedFormat,
         snapshot.records,
         snapshot.job.row.idColumnKey,
-        snapshot.job.spec.output_schema,
         snapshot.job.spec.output_field_order,
       );
       return {
@@ -1027,7 +1089,7 @@ export class AgentJobsRuntime {
     const diagnostics: JsonObject[] = [];
     const duplicateDiagnostics: JsonObject[] = [];
     const identifiers = new Map<string, number>();
-    const properties = schemaProperties(spec.inputSchema);
+    const fields = spec.input.schema;
 
     for (const [index, source] of rows.entries()) {
       let identifier: string | null = null;
@@ -1065,9 +1127,9 @@ export class AgentJobsRuntime {
       }
 
       const projected = Object.create(null) as JsonObject;
-      for (const key of Object.keys(properties)) {
-        if (Object.hasOwn(source, key))
-          projected[key] = source[key];
+      for (const [key, value] of Object.entries(source)) {
+        if (spec.input.loose || Object.hasOwn(fields, key))
+          projected[key] = value;
       }
       const jsonProblem = strictJsonProblem(projected);
       if (jsonProblem !== null) {
@@ -1079,11 +1141,15 @@ export class AgentJobsRuntime {
           message: jsonProblem,
         });
       }
-      for (const error of validationErrors(projected, spec.inputSchema)) {
+      for (const error of recordValidationErrors(
+        projected,
+        spec.input,
+        spec.inputValidation,
+      )) {
         diagnostics.push({
           row: index,
           id: identifier,
-          code: 'input_schema',
+          code: 'input_validation',
           ...error,
         });
       }
@@ -1248,20 +1314,19 @@ export class AgentJobsRuntime {
     }
     await ensureRealFile(path);
     const value = await readJson(path);
-    if (
-      !isObject(value)
-      || value.state_version !== STATE_VERSION
-      || value.handle !== handle
-      || typeof value.database_path !== 'string'
-      || typeof value.job_id !== 'string'
-      || !Number.isInteger(value.record_index)
-    ) {
+    const registry = parseValidatedValue(
+      registryEntrySchema,
+      value,
+      'invalid_handle',
+      'Assignment registry entry is invalid',
+    );
+    if (registry.handle !== handle) {
       throw new AgentJobsError(
         'invalid_handle',
         'Assignment registry entry is invalid',
       );
     }
-    return value as unknown as RegistryEntry;
+    return registry;
   }
 }
 
@@ -1287,7 +1352,11 @@ async function buildValidationSnapshot(
     let failed = 0;
 
     for (const { record, result } of rows) {
-      const inputErrors = storedInputErrors(record, job.spec.input_schema);
+      const inputErrors = storedInputErrors(
+        record,
+        job.spec.input,
+        job.inputValidation,
+      );
       if (inputErrors.length > 0) {
         invalid += 1;
         errors.push({
@@ -1319,7 +1388,11 @@ async function buildValidationSnapshot(
       }
       const rowErrors = [
         ...storedResultIdentityErrors(result, record, job.row),
-        ...validateStoredResult(result, job.spec.output_schema),
+        ...validateStoredResult(
+          result,
+          job.spec.output,
+          job.outputValidation,
+        ),
       ];
       if (rowErrors.length > 0) {
         invalid += 1;
@@ -1366,7 +1439,8 @@ async function buildValidationSnapshot(
 
 function validateStoredResult(
   result: ResultRow,
-  schema: JsonSchema,
+  config: RecordSchemaConfig,
+  validation: RecordValidationSchema,
 ): ValidationDiagnostic[] {
   if (hashText(result.outputJson) !== result.outputHash) {
     return [{
@@ -1376,7 +1450,11 @@ function validateStoredResult(
     }];
   }
   try {
-    return validationErrors(parseStrictJson(result.outputJson), schema);
+    return recordValidationErrors(
+      parseJsonObject(result.outputJson, 'stored result'),
+      config,
+      validation,
+    );
   } catch (error) {
     return [{ path: '', message: errorMessage(error), validator: 'json' }];
   }
@@ -1457,13 +1535,24 @@ function parseJob(row: JobRow): ParsedJob {
   if (row.sessionStatus !== 'active' && row.sessionStatus !== 'superseded') {
     throw new AgentJobsError('invalid_job', 'Agent job session status is invalid');
   }
+  const spec = parseValidatedValue(
+    serializedSpecSchema,
+    parseJsonObject(row.specJson, 'job spec'),
+    'invalid_job',
+    'Stored job spec is invalid',
+  );
+  const settings = parseValidatedValue(
+    resolvedSettingsSchema,
+    parseJsonObject(row.settingsJson, 'job settings'),
+    'invalid_job',
+    'Stored job settings are invalid',
+  );
   return {
     row,
-    spec: parseJsonObject(row.specJson, 'job spec') as SerializedSpec,
-    settings: parseJsonObject(
-      row.settingsJson,
-      'job settings',
-    ) as unknown as ResolvedSettings,
+    spec,
+    inputValidation: compileRecordSchema(spec.input.schema, 'input.schema'),
+    outputValidation: compileRecordSchema(spec.output.schema, 'output.schema'),
+    settings,
   };
 }
 
@@ -1510,14 +1599,10 @@ function serializeSpec(spec: TaskSpec): SerializedSpec {
     version: spec.version,
     description: spec.description ?? null,
     instructions: spec.instructions,
-    input_schema: spec.inputSchema,
-    output_schema: spec.outputSchema,
-    output_field_order: Object.keys(schemaProperties(spec.outputSchema)),
+    input: spec.input,
+    output: spec.output,
+    output_field_order: Object.keys(spec.output.schema),
   };
-}
-
-function schemaProperties(schema: JsonSchema): JsonObject {
-  return isObject(schema.properties) ? schema.properties : {};
 }
 
 function parseJsonObject(text: string, label: string): JsonObject {
@@ -1534,12 +1619,30 @@ function parseJsonObject(text: string, label: string): JsonObject {
   }
 }
 
+function parseValidatedValue<T>(
+  schema: GenericSchema<unknown, T>,
+  value: unknown,
+  code: string,
+  message: string,
+): T {
+  const parsed = v.safeParse(schema, value, { abortEarly: false });
+  if (!parsed.success) {
+    throw new AgentJobsError(
+      code,
+      message,
+      valibotDiagnostics(parsed.issues),
+    );
+  }
+  return parsed.output;
+}
+
 function parseStoredInput(
   record: JobRecordRow,
-  schema: JsonSchema,
+  config: RecordSchemaConfig,
+  validation: RecordValidationSchema,
 ): JsonObject {
   const input = parseJsonObject(record.inputJson, 'record input');
-  const errors = storedInputErrors(record, schema, input);
+  const errors = storedInputErrors(record, config, validation, input);
   if (errors.length > 0) {
     throw new AgentJobsError(
       'invalid_job',
@@ -1552,12 +1655,13 @@ function parseStoredInput(
 
 function storedInputErrors(
   record: JobRecordRow,
-  schema: JsonSchema,
+  config: RecordSchemaConfig,
+  validation: RecordValidationSchema,
   parsed?: JsonObject,
 ): ValidationDiagnostic[] {
   try {
     const input = parsed ?? parseJsonObject(record.inputJson, 'record input');
-    const errors = validationErrors(input, schema);
+    const errors = recordValidationErrors(input, config, validation);
     if (hashJson({ id: record.recordId, input }) !== record.inputHash) {
       errors.unshift({
         path: '',
@@ -1606,11 +1710,19 @@ function chunks<T>(values: T[], size: number): T[][] {
   return result;
 }
 
+function listsObjectKeys(
+  keys: readonly string[],
+  object: Record<string, unknown>,
+): boolean {
+  return keys.length === Object.keys(object).length
+    && new Set(keys).size === keys.length
+    && keys.every(key => Object.hasOwn(object, key));
+}
+
 async function registryDatabasePath(registry: RegistryEntry): Promise<string> {
   const path = registry.database_path;
   if (
     !isAbsolute(path)
-    || !JOB_ID_PATTERN.test(registry.job_id)
     || basename(path) !== DATABASE_FILENAME
     || basename(dirname(path)) !== '.batch'
   ) {
@@ -1634,8 +1746,7 @@ async function writeCollection(
   format: Exclude<CollectFormat, 'none'>,
   records: JsonObject[],
   idKey: string,
-  outputSchema: JsonSchema,
-  outputFieldOrder?: string[],
+  outputFields: string[],
 ): Promise<void> {
   if (format === 'json') {
     await atomicWriteText(path, `${stringifyStrictJson(records, { pretty: true })}\n`);
@@ -1649,9 +1760,7 @@ async function writeCollection(
     return;
   }
   const fields = [idKey];
-  const declaredFields
-    = outputFieldOrder ?? Object.keys(schemaProperties(outputSchema));
-  for (const key of declaredFields) {
+  for (const key of outputFields) {
     if (!fields.includes(key))
       fields.push(key);
   }

@@ -1,9 +1,9 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
-import * as z from 'zod/v4';
 
 import { AgentJobsError } from './errors.js';
 import { isPreciseNumber, preciseNumberText } from './numbers.js';
+import { recordSchemaToStandardSchema } from './schema.js';
 import { AgentJobsRuntime } from './state.js';
 import { parseStrictJson, stringifyStrictJson } from './storage.js';
 
@@ -24,96 +24,70 @@ type SubmitToolArguments = {
   result: string;
 };
 
-const submitToolJsonSchema = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['handle', 'result_format', 'result'],
-  properties: {
-    handle: { type: 'string', minLength: 1 },
-    result_format: {
-      type: 'string',
-      enum: ['json_object', 'json_text'],
-    },
-    result: {
-      description:
-        'A JSON object for json_object, or exact JSON object text for json_text.',
-    },
-  },
-} as const;
-
 /**
- * A Standard Schema passthrough keeps the advertised schema flat because Claude
- * Code rejects MCP tools that use top-level `oneOf`. The format discriminator is
- * checked here without rebuilding JSON objects, which would silently drop an own
- * `__proto__` field before task-specific validation. Exact JSON text also keeps
- * numeric literals that the JSON-RPC client's JavaScript model cannot represent
- * losslessly.
+ * The shared field DSL keeps the advertised schema flat because Claude Code
+ * rejects MCP tools that use top-level `oneOf`. The discriminator refinement does
+ * not rebuild objects, so an own `__proto__` field survives task validation.
  */
-const submitToolInputSchema = {
-  '~standard': {
-    version: 1 as const,
-    vendor: 'agent-jobs',
-    types: undefined as unknown as {
-      input: SubmitToolArguments;
-      output: SubmitToolArguments;
-    },
-    validate(value: unknown) {
-      const issues: Array<{
-        message: string;
-        path?: Array<{ key: PropertyKey }>;
-      }> = [];
-      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-        return { issues: [{ message: 'arguments must be an object' }] };
-      }
-      const object = value as Record<string, unknown>;
-      if (typeof object.handle !== 'string' || object.handle.length === 0) {
-        issues.push({ message: 'handle must be a non-empty string', path: [{ key: 'handle' }] });
-      }
-
-      if (
-        object.result_format !== 'json_object'
-        && object.result_format !== 'json_text'
-      ) {
-        issues.push({
-          message: 'result_format must be json_object or json_text',
-          path: [{ key: 'result_format' }],
-        });
-      }
-
-      if (!Object.hasOwn(object, 'result')) {
-        issues.push({ message: 'result is required', path: [{ key: 'result' }] });
-      } else if (
-        object.result_format === 'json_object' && (
-          object.result === null
-          || typeof object.result !== 'object'
-          || Array.isArray(object.result)
-        )
-      ) {
-        issues.push({
-          message: 'result must be an object for json_object',
-          path: [{ key: 'result' }],
-        });
-      } else if (object.result_format === 'json_text' && typeof object.result !== 'string') {
-        issues.push({
-          message: 'result must be a string for json_text',
-          path: [{ key: 'result' }],
-        });
-      }
-      for (const key of Object.keys(object)) {
-        if (key !== 'handle' && key !== 'result_format' && key !== 'result') {
-          issues.push({ message: `unexpected property: ${key}`, path: [{ key }] });
-        }
-      }
-      return issues.length > 0
-        ? { issues }
-        : { value: object as unknown as SubmitToolArguments };
-    },
-    jsonSchema: {
-      input: () => submitToolJsonSchema,
-      output: () => submitToolJsonSchema,
-    },
+const submitToolInputSchema = recordSchemaToStandardSchema<SubmitToolArguments>({
+  handle: { type: 'string', minLength: 1 },
+  result_format: {
+    type: 'string',
+    enum: ['json_object', 'json_text'],
   },
-};
+  result: {
+    type: ['object', 'string'],
+    loose: true,
+    description:
+      'A JSON object for json_object, or exact JSON object text for json_text.',
+  },
+}, {
+  refine(arguments_) {
+    if (!Object.hasOwn(arguments_, 'result'))
+      return [];
+    if (
+      arguments_.result_format === 'json_object'
+      && (
+        arguments_.result === null
+        || typeof arguments_.result !== 'object'
+        || Array.isArray(arguments_.result)
+      )
+    ) {
+      return [{
+        path: '/result',
+        message: 'result must be an object for json_object',
+        validator: 'result_format',
+      }];
+    }
+    if (
+      arguments_.result_format === 'json_text'
+      && typeof arguments_.result !== 'string'
+    ) {
+      return [{
+        path: '/result',
+        message: 'result must be a string for json_text',
+        validator: 'result_format',
+      }];
+    }
+    return [];
+  },
+});
+
+const getAssignmentToolInputSchema = recordSchemaToStandardSchema<{
+  handle: string;
+}>({
+  handle: { type: 'string', minLength: 1 },
+});
+
+const reportFailureToolInputSchema = recordSchemaToStandardSchema<{
+  handle: string;
+  code: string;
+  message: string;
+}>({
+  handle: { type: 'string', minLength: 1 },
+  code: { type: 'string', minLength: 1 },
+  message: { type: 'string', minLength: 1 },
+});
 
 let runtimeInstance: AgentJobsRuntime | undefined;
 
@@ -259,7 +233,7 @@ export function createAgentJobsServer(
     {
       description:
         'Consume an opaque handle and retrieve its single row, task instructions, and schemas.',
-      inputSchema: z.object({ handle: z.string().min(1) }),
+      inputSchema: getAssignmentToolInputSchema,
     },
     async ({ handle }) =>
       exactJsonToolResult(await getAssignment(handle, runtime)),
@@ -280,11 +254,7 @@ export function createAgentJobsServer(
     'report_failure',
     {
       description: 'Record a retryable or terminal failure for one assignment.',
-      inputSchema: z.object({
-        handle: z.string().min(1),
-        code: z.string().min(1),
-        message: z.string().min(1),
-      }),
+      inputSchema: reportFailureToolInputSchema,
     },
     async ({ handle, code, message }) =>
       toolResult(await reportFailure(handle, code, message, runtime)),

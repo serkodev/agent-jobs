@@ -6,6 +6,7 @@ import {
   readdir,
   readFile,
   realpath,
+  rename,
   rm,
   symlink,
   unlink,
@@ -53,8 +54,13 @@ afterEach(async () => {
 
 async function fixture(options: {
   rows?: unknown[];
-  inputSchema?: Record<string, unknown>;
-  outputSchema?: Record<string, unknown>;
+  inputFields?: Record<string, unknown>;
+  inputLoose?: boolean;
+  omitInput?: boolean;
+  omitName?: boolean;
+  specFileName?: string;
+  outputFields?: Record<string, unknown>;
+  outputLoose?: boolean;
   model?: string;
   reasoningEffort?: string;
   rawInput?: string;
@@ -68,37 +74,42 @@ async function fixture(options: {
   const root = await mkdtemp(join(tmpdir(), 'batch-runtime-test-'));
   temporaryRoots.push(root);
   const inputPath = join(root, 'input.json');
-  const specPath = join(root, 'task.md');
+  const specPath = join(root, options.specFileName ?? 'task.md');
   const outputDir = join(root, 'output');
-  const inputSchema
-    = options.inputSchema
+  const inputFields
+    = options.inputFields
       ?? ({
-        type: 'object',
-        properties: {
-          id: { type: ['string', 'integer'] },
-          title: { type: 'string', minLength: 1 },
-        },
-        required: ['id', 'title'],
-        additionalProperties: false,
+        id: { type: ['string', 'integer'] },
+        title: { type: 'string', minLength: 1 },
       } satisfies Record<string, unknown>);
-  const outputSchema
-    = options.outputSchema
+  const outputFields
+    = options.outputFields
       ?? ({
-        type: 'object',
-        properties: {
-          summary: { type: 'string', minLength: 1 },
-          vote: { type: 'string', enum: ['accept', 'reject'] },
-          details: { type: 'object' },
+        summary: { type: 'string', minLength: 1 },
+        vote: {
+          type: 'string',
+          enum: ['accept', 'reject'],
         },
-        required: ['summary', 'vote'],
-        additionalProperties: false,
+        details: {
+          type: 'object',
+          optional: true,
+          properties: { score: { type: 'integer' } },
+        },
       } satisfies Record<string, unknown>);
   const metadata: Record<string, unknown> = {
-    name: 'runtime-test',
+    ...(options.omitName ? {} : { name: 'runtime-test' }),
     version: 1,
-    input_schema: inputSchema,
-    output_schema: outputSchema,
+    output: {
+      ...(options.outputLoose === undefined ? {} : { loose: options.outputLoose }),
+      schema: outputFields,
+    },
   };
+  if (!options.omitInput) {
+    metadata.input = {
+      ...(options.inputLoose === undefined ? {} : { loose: options.inputLoose }),
+      schema: inputFields,
+    };
+  }
   if (options.model !== undefined)
     metadata.model = options.model;
   if (options.reasoningEffort !== undefined) {
@@ -208,6 +219,94 @@ describe('agentJobsRuntime', () => {
     });
   });
 
+  it('stores field configs without synthesizing another root schema', async () => {
+    const context = await fixture();
+    const prepared = await prepare(context);
+    const [row] = await sqliteRows(
+      prepared.database,
+      'SELECT state_version, spec_json FROM jobs WHERE job_id = ?',
+      [prepared.job_id],
+    );
+    const stored = parseStrictJson(String(row!.spec_json)) as Record<string, unknown>;
+
+    expect(row!.state_version).toBe(1);
+    expect(Object.keys(stored).sort()).toEqual([
+      'description',
+      'input',
+      'instructions',
+      'name',
+      'output',
+      'output_field_order',
+      'version',
+    ]);
+    expect(stored).toMatchObject({
+      input: {
+        loose: false,
+        schema: {
+          id: { type: ['string', 'integer'] },
+          title: { type: 'string' },
+        },
+      },
+      output: {
+        loose: false,
+        schema: {
+          summary: { type: 'string' },
+          vote: { type: 'string' },
+        },
+      },
+    });
+  });
+
+  it('rejects unknown fields in persisted job structures', async () => {
+    const context = await fixture();
+    const prepared = await prepare(context);
+    const [row] = await sqliteRows(
+      prepared.database,
+      'SELECT spec_json, settings_json FROM jobs WHERE job_id = ?',
+      [prepared.job_id],
+    );
+    const stored = parseStrictJson(String(row!.spec_json)) as Record<string, unknown>;
+    stored.retired = true;
+    await sqliteRows(
+      prepared.database,
+      'UPDATE jobs SET spec_json = ? WHERE job_id = ?',
+      [stringifyStrictJson(stored), prepared.job_id],
+    );
+
+    await expect(
+      context.runtime.status(context.outputDir, prepared.job_id),
+    ).rejects.toMatchObject({ code: 'invalid_job' });
+
+    delete stored.retired;
+    const settings = parseStrictJson(
+      String(row!.settings_json),
+    ) as Record<string, unknown>;
+    settings.retired = true;
+    await sqliteRows(
+      prepared.database,
+      'UPDATE jobs SET spec_json = ?, settings_json = ? WHERE job_id = ?',
+      [stringifyStrictJson(stored), stringifyStrictJson(settings), prepared.job_id],
+    );
+    await expect(
+      context.runtime.status(context.outputDir, prepared.job_id),
+    ).rejects.toMatchObject({ code: 'invalid_job' });
+
+    const handleContext = await fixture();
+    const handleJob = await prepare(handleContext);
+    const [lease] = await nextLeases(handleContext, handleJob.job_id);
+    const registryPath = join(
+      handleContext.root,
+      'registry',
+      `${lease!.handle}.json`,
+    );
+    const registry = await readStrict(registryPath) as Record<string, unknown>;
+    registry.retired = true;
+    await writeFile(registryPath, stringifyStrictJson(registry), 'utf8');
+    await expect(
+      handleContext.runtime.getAssignment(lease!.handle),
+    ).rejects.toMatchObject({ code: 'invalid_handle' });
+  });
+
   it('rejects duplicate canonical IDs without imposing filename rules', async () => {
     const duplicate = await fixture({
       rows: [
@@ -260,15 +359,10 @@ describe('agentJobsRuntime', () => {
     const context = await fixture({
       rawInput:
         '[{"id":0,"title":"Zero","score":1.0},{"id":-42,"title":"Negative","score":1e0}]\n',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          id: { type: ['string', 'integer'] },
-          title: { type: 'string', minLength: 1 },
-          score: { type: 'number' },
-        },
-        required: ['id', 'title', 'score'],
-        additionalProperties: false,
+      inputFields: {
+        id: { type: ['string', 'integer'] },
+        title: { type: 'string', minLength: 1 },
+        score: { type: 'number' },
       },
     });
 
@@ -303,30 +397,82 @@ describe('agentJobsRuntime', () => {
     expect(assignment.task_spec).toMatchObject({
       name: 'runtime-test',
       instructions: 'Process exactly one row independently.',
+      input: {
+        loose: false,
+        schema: {
+          id: { type: ['string', 'integer'] },
+          title: { type: 'string' },
+        },
+      },
+      output: {
+        loose: false,
+        schema: {
+          summary: { type: 'string' },
+          vote: { type: 'string' },
+        },
+      },
     });
     await expect(
       context.runtime.getAssignment(lease!.handle),
     ).rejects.toMatchObject({ code: 'handle_consumed' });
   });
 
+  it('passes through and hashes every input field when input is omitted', async () => {
+    const context = await fixture({
+      rawInput: '[{"id":"one","title":"Visible","secret":"kept"}]\n',
+      omitInput: true,
+      outputLoose: true,
+    });
+    const prepared = await prepare(context);
+    const [lease] = await nextLeases(context, prepared.job_id);
+    const assignment = await context.runtime.getAssignment(lease!.handle);
+
+    expect(assignment.input).toEqual({
+      id: 'one',
+      title: 'Visible',
+      secret: 'kept',
+    });
+    expect(assignment).not.toHaveProperty('id');
+    expect(assignment.task_spec).toMatchObject({
+      input: { loose: true, schema: {} },
+      output: { loose: true },
+    });
+    await context.runtime.submitResult(lease!.handle, {
+      ...result('one'),
+      undeclared: 'kept',
+    });
+
+    const collected = await context.runtime.collect(
+      context.outputDir,
+      prepared.job_id,
+      { format: 'json' },
+    );
+    expect(await readStrict(collected.path as string)).toEqual([{
+      id: 'one',
+      ...result('one'),
+      undeclared: 'kept',
+    }]);
+
+    await writeFile(
+      context.inputPath,
+      '[{"id":"one","title":"Visible","secret":"changed"}]\n',
+      'utf8',
+    );
+    await expect(prepare(context)).resolves.toMatchObject({
+      counts: { pending: 1, skipped_valid: 0 },
+    });
+  });
+
   it('roundtrips precise decimals through assignment, result, and collection', async () => {
     const context = await fixture({
       rawInput:
         '[{"id":"exact","value":0.100000000000000000001}]\n',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          id: { type: 'string' },
-          value: { type: 'number' },
-        },
-        required: ['id', 'value'],
-        additionalProperties: false,
+      inputFields: {
+        id: { type: 'string' },
+        value: { type: 'number' },
       },
-      outputSchema: {
-        type: 'object',
-        properties: { value: { type: 'number' } },
-        required: ['value'],
-        additionalProperties: false,
+      outputFields: {
+        value: { type: 'number' },
       },
     });
     const prepared = await prepare(context);
@@ -417,11 +563,8 @@ describe('agentJobsRuntime', () => {
   it('does not reveal the canonical ID unless the input schema declares its key', async () => {
     const context = await fixture({
       rows: [{ row_key: 'private-id', title: 'Visible' }],
-      inputSchema: {
-        type: 'object',
-        properties: { title: { type: 'string' } },
-        required: ['title'],
-        additionalProperties: false,
+      inputFields: {
+        title: { type: 'string' },
       },
     });
     const prepared = await prepare(context, { idColumnKey: 'row_key' });
@@ -436,23 +579,23 @@ describe('agentJobsRuntime', () => {
     const context = await fixture({
       rawInput:
         '[{"id":"one","__proto__":{"polluted":"input-value"}}]\n',
-      inputSchema: {
-        type: 'object',
-        properties: Object.fromEntries([
+      inputFields: {
+        ...Object.fromEntries([
           ['id', { type: 'string' }],
-          ['__proto__', { type: 'object' }],
+          ['__proto__', {
+            type: 'object',
+            properties: { polluted: { type: 'string' } },
+          }],
         ]),
-        required: ['id', '__proto__'],
-        additionalProperties: false,
       },
-      outputSchema: {
-        type: 'object',
-        properties: Object.fromEntries([
-          ['__proto__', { type: 'object' }],
+      outputFields: {
+        ...Object.fromEntries([
+          ['__proto__', {
+            type: 'object',
+            properties: { polluted: { type: 'string' } },
+          }],
           ['summary', { type: 'string' }],
         ]),
-        required: ['__proto__', 'summary'],
-        additionalProperties: false,
       },
     });
     const prepared = await prepare(context);
@@ -536,6 +679,12 @@ describe('agentJobsRuntime', () => {
 
     await expect(
       context.runtime.submitResult(lease!.handle, { summary: 'missing vote' }),
+    ).rejects.toMatchObject({ code: 'output_validation_failed' });
+    await expect(
+      context.runtime.submitResult(lease!.handle, {
+        ...result('one'),
+        undeclared: true,
+      }),
     ).rejects.toMatchObject({ code: 'output_validation_failed' });
     await expect(
       sqliteRows(prepared.database, 'SELECT * FROM results'),
@@ -723,6 +872,37 @@ describe('agentJobsRuntime', () => {
     expect(changedTask.counts).toMatchObject({ skipped_valid: 0, pending: 1 });
     expect(changedTask.task_hash).not.toBe(first.task_hash);
     expect(changedTask.execution_hash).not.toBe(first.execution_hash);
+  });
+
+  it('uses a derived filename as persisted task and cache identity', async () => {
+    const context = await fixture({
+      omitName: true,
+      specFileName: 'summarize-article.md',
+    });
+    const first = await prepare(context);
+    const [firstLease] = await nextLeases(context, first.job_id);
+    await complete(context, firstLease!, result('cached'));
+
+    const renamedSpecPath = join(context.root, 'review.task.md');
+    await rename(context.specPath, renamedSpecPath);
+    const renamed = await prepare(context, { taskSpec: renamedSpecPath });
+
+    expect(renamed.counts).toMatchObject({ skipped_valid: 0, pending: 1 });
+    expect(renamed.task_hash).not.toBe(first.task_hash);
+    expect(renamed.execution_hash).not.toBe(first.execution_hash);
+
+    const [stored] = await sqliteRows(
+      renamed.database,
+      'SELECT spec_json FROM jobs WHERE job_id = ?',
+      [renamed.job_id],
+    );
+    expect(parseStrictJson(String(stored!.spec_json))).toMatchObject({
+      name: 'review.task',
+    });
+
+    const [renamedLease] = await nextLeases(context, renamed.job_id);
+    const assignment = await context.runtime.getAssignment(renamedLease!.handle);
+    expect(assignment.task_spec).toMatchObject({ name: 'review.task' });
   });
 
   it('detects stored input and result identity tampering', async () => {

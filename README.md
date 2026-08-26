@@ -13,7 +13,7 @@ interrupted runs can resume safely.
 Key benefits:
 
 - A fresh agent context for every record
-- JSON Schema validation for both inputs and outputs
+- One small, shared field-schema DSL for inputs, outputs, and MCP tools
 - Bounded concurrency and automatic retries
 - Durable, resumable progress with transactional result commits
 - Small parent context: workers receive only their assigned record
@@ -98,25 +98,18 @@ only instruction sent to each row worker.
 ---
 name: review-proposal
 version: 1
-input_schema:
-  type: object
-  additionalProperties: false
-  required: [id, title]
-  properties:
-    id:
-      type: string
-    title:
-      type: string
-output_schema:
-  type: object
-  additionalProperties: false
-  required: [decision, reason]
-  properties:
+input:
+  loose: false
+  schema:
+    id: string
+    title: string
+output:
+  loose: false
+  schema:
     decision:
       type: string
       enum: [accept, reject]
-    reason:
-      type: string
+    reason: string
 ---
 
 Review the proposal title. Return a decision and a concise reason.
@@ -126,16 +119,69 @@ The frontmatter supports these fields:
 
 | Field | Required | Purpose |
 | --- | --- | --- |
-| `name` | Yes | Stable name for the task |
+| `output` | Yes | Output field schema and passthrough setting |
+| `input` | No | Input field schema and passthrough setting |
+| `name` | No | Stable task name; defaults to the spec filename without its final extension |
 | `version` | No | Task definition version; default: `1` |
-| `input_schema` | Yes | JSON Schema for each input record |
-| `output_schema` | Yes | JSON Schema for each worker result |
 | `description` | No | Human-readable task description |
 | `model` | No | Default worker model |
 | `reasoning_effort` | No | Default worker reasoning effort |
 
-Workers receive only fields declared in `input_schema.properties`. Invalid inputs
-are rejected before any worker starts.
+<details>
+<summary>Input/output schema DSL reference</summary>
+
+Each input or output `schema` maps field names to their types. Declared fields are
+required by default; add `optional: true` only when a field may be omitted. Simple
+fields use the short form shown above, such as `id: string`.
+
+Every field has a `type`: `string`, `integer`, `number`, `boolean`, `null`,
+`object`, or `array`. A type array, such as `[string, integer]` or
+`[string, null]`, defines a union. `integer` accepts arbitrarily large integers
+without rounding; `number` accepts both integers and floating-point JSON numbers,
+including losslessly parsed decimals.
+
+When a field needs no other options, its type can be written directly. These two
+forms are equivalent:
+
+```yaml
+id: string
+```
+
+```yaml
+id:
+  type: string
+```
+
+The shorthand also works inside nested `properties` and for array `items`.
+
+The DSL supports these optional constraints:
+
+| Applies to | Keys |
+| --- | --- |
+| Every field | `optional`, `description`, `enum` |
+| `string` | `minLength`, `maxLength`, `pattern` |
+| `integer`, `number` | `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf` |
+| `array` | `items`, `minItems`, `maxItems`, `uniqueItems` |
+| `object` | `properties`, `loose`, `minProperties`, `maxProperties` |
+
+Nested `properties` use the same field definitions. Objects are strict by default;
+set their `loose: true` to accept undeclared nested fields. Unknown DSL keys and
+constraints used with an incompatible type are rejected as spec errors instead of
+being silently ignored.
+
+Within an explicit top-level `input` or `output`, `loose` also defaults to `false`:
+undeclared input fields are omitted and undeclared output fields are rejected. Set
+the corresponding `loose: true` to pass those fields through.
+
+The entire `input` block is optional. Omitting it is equivalent to
+`input: { loose: true, schema: {} }`, so every input field is passed to the worker
+and participates in its cache identity. This is useful when the task instructions
+validate arbitrary input. `output` is always required. Because every input and
+output schema is already an object record, no outer object boilerplate is needed.
+The same Valibot-parsed DSL validates task data and MCP tool arguments. Invalid
+schema-constrained inputs are rejected before any worker starts.
+
+</details>
 
 ### 3. Send the prompt
 

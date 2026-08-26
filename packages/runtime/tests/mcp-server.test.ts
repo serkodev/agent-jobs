@@ -50,16 +50,36 @@ describe('agent_jobs MCP surface', () => {
       )?.inputSchema;
       expect(submitInputSchema).toMatchObject({
         type: 'object',
+        additionalProperties: false,
         required: ['handle', 'result_format', 'result'],
         properties: {
+          handle: { type: 'string', minLength: 1 },
           result_format: {
             type: 'string',
             enum: ['json_object', 'json_text'],
           },
-          result: {},
+          result: {
+            type: ['object', 'string'],
+            additionalProperties: true,
+          },
         },
       });
       expect(submitInputSchema).not.toHaveProperty('oneOf');
+      expect(tools.tools.find(
+        tool => tool.name === 'get_assignment',
+      )?.inputSchema).toMatchObject({
+        type: 'object',
+        additionalProperties: false,
+        required: ['handle'],
+        properties: { handle: { type: 'string', minLength: 1 } },
+      });
+      expect(tools.tools.find(
+        tool => tool.name === 'report_failure',
+      )?.inputSchema).toMatchObject({
+        type: 'object',
+        additionalProperties: false,
+        required: ['handle', 'code', 'message'],
+      });
 
       const result = await client.callTool({
         name: 'get_assignment',
