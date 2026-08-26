@@ -4,7 +4,7 @@
 When a prompt contains all four markers `INPUT_DATA:`, `TASK_SPEC:`,
 `ID_COLUMN_KEY:`, and `OUTPUT_DIR:`, load and follow
 `{{SKILL_PATH}}`. Do not read the full input in the parent context or access the
-`OUTPUT_DIR/.batch/agent-jobs.sqlite` database directly. The installed Agent Jobs
+`OUTPUT_DIR/.agent-jobs/state.sqlite` database directly. The installed Agent Jobs
 CLI owns validation, queue state, assignment delivery, result commits, and resume
 behavior.
 

@@ -47,7 +47,8 @@ import {
 } from './storage.js';
 
 export const STATE_VERSION = 1;
-const DATABASE_FILENAME = 'agent-jobs.sqlite';
+const STATE_DIRECTORY = '.agent-jobs';
+const DATABASE_FILENAME = 'state.sqlite';
 const HANDLE_PREFIX = 'aj_';
 const HANDLE_PATTERN = /^aj_[\w-]{32,}$/;
 const JOB_ID_PATTERN = /^[0-9a-f]{32}$/;
@@ -1724,7 +1725,7 @@ async function registryDatabasePath(registry: RegistryEntry): Promise<string> {
   if (
     !isAbsolute(path)
     || basename(path) !== DATABASE_FILENAME
-    || basename(dirname(path)) !== '.batch'
+    || basename(dirname(path)) !== STATE_DIRECTORY
   ) {
     throw new AgentJobsError('invalid_handle', 'Handle database path is invalid');
   }
@@ -1738,7 +1739,7 @@ async function registryDatabasePath(registry: RegistryEntry): Promise<string> {
 }
 
 function databasePathFor(destination: string): string {
-  return join(destination, '.batch', DATABASE_FILENAME);
+  return join(destination, STATE_DIRECTORY, DATABASE_FILENAME);
 }
 
 async function writeCollection(
@@ -1806,7 +1807,7 @@ async function ensureOutputLayout(
   create: boolean,
 ): Promise<void> {
   await ensureRealDirectory(destination, create, create);
-  await ensureRealDirectory(join(destination, '.batch'), create, false);
+  await ensureRealDirectory(join(destination, STATE_DIRECTORY), create, false);
 }
 
 async function ensureDatabaseStorage(path: string, create: boolean): Promise<void> {

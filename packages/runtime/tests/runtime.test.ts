@@ -509,7 +509,7 @@ describe('agentJobsRuntime', () => {
     const prepared = await prepare(context, { outputDir: lexicalOutput });
     expect(prepared.output_dir).toBe(expectedOutput);
     expect(prepared.database).toBe(
-      join(expectedOutput, '.batch', 'agent-jobs.sqlite'),
+      join(expectedOutput, '.agent-jobs', 'state.sqlite'),
     );
     await expect(
       sqliteRows(
@@ -1192,7 +1192,7 @@ describe('agentJobsRuntime', () => {
     await mkdir(context.outputDir);
     const outside = join(context.root, 'outside');
     await mkdir(outside);
-    await symlink(outside, join(context.outputDir, '.batch'), 'dir');
+    await symlink(outside, join(context.outputDir, '.agent-jobs'), 'dir');
     await expect(prepare(context)).rejects.toMatchObject({
       code: 'unsafe_output_path',
       details: { reason: 'symlink' },

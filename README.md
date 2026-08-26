@@ -270,7 +270,7 @@ Each run stores durable state under the selected `OUTPUT_DIR`:
 
 ```text
 proposal-results/
-  .batch/agent-jobs.sqlite  # Authoritative jobs, rows, leases, and results
+  .agent-jobs/state.sqlite  # Authoritative jobs, rows, leases, and results
   report.json              # Exported final validation report
   collected.json           # Optional combined output
 ```
