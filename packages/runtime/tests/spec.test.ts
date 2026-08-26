@@ -275,19 +275,19 @@ Task.
 `))).rejects.toMatchObject({ code: 'invalid_spec' });
   });
 
-  it('normalizes scalar type shorthand for fields, properties, and items', async () => {
+  it('normalizes type shorthand for fields, unions, properties, and items', async () => {
     const spec = await loadSpec(await rawSpec(`---
 name: shorthand
 input:
   schema:
-    id: string
+    id: [string, integer]
     profile:
       type: object
       properties:
         name: string
     scores:
       type: array
-      items: integer
+      items: [integer, string]
 output:
   schema:
     summary: string
@@ -296,14 +296,14 @@ Use shorthand.
 `));
 
     expect(spec.input.schema).toEqual({
-      id: { type: 'string' },
+      id: { type: ['string', 'integer'] },
       profile: {
         type: 'object',
         properties: { name: { type: 'string' } },
       },
       scores: {
         type: 'array',
-        items: { type: 'integer' },
+        items: { type: ['integer', 'string'] },
       },
     });
     expect(spec.output.schema).toEqual({
@@ -314,6 +314,7 @@ Use shorthand.
   it('rejects unknown shorthand types and incompatible DSL keys', async () => {
     const invalidFields: Array<Record<string, unknown>> = [
       { title: 'not-a-type' },
+      { title: ['string', 'not-a-type'] },
       { title: { optional: true } },
       { title: { type: 'not-a-type' } },
       { title: { type: 'string', required: true } },

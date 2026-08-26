@@ -152,7 +152,14 @@ id:
   type: string
 ```
 
-The shorthand also works inside nested `properties` and for array `items`.
+Union types can use the same shorthand:
+
+```yaml
+id: [string, integer]
+```
+
+This is equivalent to `id: { type: [string, integer] }`. The shorthand also works
+inside nested `properties` and for array `items`.
 
 The DSL supports these optional constraints:
 

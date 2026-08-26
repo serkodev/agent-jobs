@@ -121,7 +121,7 @@ const fieldSchemaParser = v.strictObject({
   description: v.optional(v.string()),
   enum: v.optional(v.pipe(v.array(v.unknown()), v.minLength(1))),
   properties: v.optional(objectValueSchema),
-  items: v.optional(v.union([fieldTypeSchema, objectValueSchema])),
+  items: v.optional(v.union([fieldTypesSchema, objectValueSchema])),
   loose: v.optional(v.boolean()),
   minLength: v.optional(sizeSchema),
   maxLength: v.optional(sizeSchema),
@@ -169,7 +169,7 @@ export function compileRecordSchema(
 /** Validate one value against a field definition. */
 export function fieldValidationErrors(
   value: unknown,
-  definition: FieldSchema | FieldType,
+  definition: FieldSchema | FieldSchema['type'],
 ): ValidationDiagnostic[] {
   const schema = parseFieldSchema(definition, 'field', true);
   return sortDiagnostics(validateField(value, schema, ''));
@@ -248,7 +248,7 @@ function parseFieldSchema(
   path: string,
   property: boolean,
 ): FieldSchema {
-  const expanded = typeof definition === 'string'
+  const expanded = typeof definition === 'string' || Array.isArray(definition)
     ? { type: definition }
     : definition;
   const result = v.safeParse(fieldSchemaParser, expanded, {
