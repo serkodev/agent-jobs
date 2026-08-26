@@ -183,6 +183,22 @@ describe('runCli', () => {
     expect(stdout.read()).toBe('');
   });
 
+  it('does not expose the removed uninstall command', async () => {
+    const stdout = captureStream();
+    const help = captureStream();
+
+    expect(await runCli(['uninstall'], { runtime: fakeRuntime(), stdout: stdout.stream })).toBe(2);
+    expect(JSON.parse(stdout.read())).toMatchObject({
+      ok: false,
+      error: {
+        code: 'invalid_arguments',
+        message: 'Unsupported command: uninstall',
+      },
+    });
+    expect(await runCli(['--help'], { stdout: help.stream })).toBe(0);
+    expect(help.read()).not.toContain('uninstall');
+  });
+
   it('emits one interrupted JSON result and exit 130 on SIGINT', async () => {
     let finishStatus!: (value: Record<string, unknown>) => void;
     const runtime = fakeRuntime({

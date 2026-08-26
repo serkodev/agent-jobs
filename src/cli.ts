@@ -58,7 +58,6 @@ const HELP = `Usage: agent-jobs <command> [options]
 
 Commands:
   init      Initialize Agent Jobs in the current or specified directory
-  uninstall Remove files managed by a previous Agent Jobs initialization
   prepare   Validate all input rows and prepare a batch
   next      Issue opaque worker assignments
   status    Inspect batch progress
@@ -72,7 +71,7 @@ Installer options:
   --target <host>         all, codex, or claude
   --global                Configure the current user's home directory
   --yes                   Skip the final confirmation
-  --force                 Replace edited managed files after backing them up
+  --force                 Replace differing managed files
   --json                  Emit a machine-readable result (requires --yes)
 `;
 
@@ -309,8 +308,8 @@ export async function runCli(
       await (dependencies.runMcp ?? runMcpServer)();
       return 0;
     }
-    if (command === 'init' || command === 'uninstall') {
-      return await runInstallerCommand(command, argv.slice(1), {
+    if (command === 'init') {
+      return await runInstallerCommand(argv.slice(1), {
         ...dependencies.installer,
         stdout,
         stderr,

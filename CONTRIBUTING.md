@@ -55,12 +55,6 @@ cd playground
 node ../dist/agent-jobs.mjs doctor
 ```
 
-Return to the repository root and test removal when needed:
-
-```bash
-pnpm agent-jobs uninstall playground --yes
-```
-
 ## Repository structure
 
 The pnpm workspace contains two packages:

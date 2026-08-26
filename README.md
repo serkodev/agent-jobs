@@ -55,17 +55,15 @@ npx agent-jobs init --global --target claude
 Use `--yes` to skip the final confirmation. In a non-interactive environment,
 `--yes` is required; omitted values use the current project and both agent hosts.
 Use `--force` only when you intentionally want to replace managed files that have
-been edited since installation. `uninstall` uses the same interactive selection and
-preview flow.
+been edited since installation.
 
 Restart Codex or Claude after installation so it discovers the new skill, agents,
 and MCP configuration.
 
-To check or remove the installation:
+To check the installation:
 
 ```bash
 npx agent-jobs doctor
-npx agent-jobs uninstall
 ```
 
 ## Create a job
@@ -248,8 +246,6 @@ prompt marker > task spec > parent agent setting
 A project installation adds only host integration files:
 
 ```text
-.agent-jobs/install-manifest.json
-
 # Codex
 AGENTS.md
 .agents/skills/agent-jobs/
@@ -266,9 +262,9 @@ CLAUDE.md
 .mcp.json
 ```
 
-The installer tracks its managed changes in `.agent-jobs/install-manifest.json` so
-they can be checked and removed safely. During execution, `.agent-jobs/handles/`
-stores temporary local assignment capabilities; it is not part of the job output.
+The installer does not write an installation manifest. During execution,
+`.agent-jobs/handles/` stores temporary local assignment capabilities; it is not
+part of the job output.
 
 Each run stores durable state under the selected `OUTPUT_DIR`:
 

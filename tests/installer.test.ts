@@ -102,7 +102,7 @@ describe('agent-jobs installer', () => {
     const stderr = capture();
 
     await expect(
-      runInstallerCommand('init', ['--yes', '--json'], {
+      runInstallerCommand(['--yes', '--json'], {
         cwd: context.cwd,
         homeDir: context.home,
         bundlePath: context.bundle,
@@ -121,13 +121,9 @@ describe('agent-jobs installer', () => {
       targets: ['codex', 'claude'],
       create: false,
     });
-    const manifest = JSON.parse(
-      await readFile(join(context.cwd, '.agent-jobs', 'install-manifest.json'), 'utf8'),
-    ) as { package_version: string };
-    const packageMetadata = JSON.parse(
-      await readFile(join(process.cwd(), 'package.json'), 'utf8'),
-    ) as { version: string };
-    expect(manifest.package_version).toBe(packageMetadata.version);
+    await expect(exists(join(context.cwd, '.agent-jobs', 'install-manifest.json'))).resolves.toBe(
+      false,
+    );
     const codexScript = join(
       context.cwd,
       '.agents',
@@ -231,7 +227,7 @@ describe('agent-jobs installer', () => {
     const prompts = fakePrompts({ confirm: false });
 
     await expect(
-      runInstallerCommand('init', [target, '--target', 'codex'], {
+      runInstallerCommand([target, '--target', 'codex'], {
         cwd: context.cwd,
         homeDir: context.home,
         bundlePath: context.bundle,
@@ -277,7 +273,7 @@ describe('agent-jobs installer', () => {
     });
 
     await expect(
-      runInstallerCommand('init', [], {
+      runInstallerCommand([], {
         cwd: context.cwd,
         homeDir: context.home,
         bundlePath: context.bundle,
@@ -318,7 +314,7 @@ describe('agent-jobs installer', () => {
     const prompts = fakePrompts({ select: [Symbol('cancel')] });
 
     await expect(
-      runInstallerCommand('init', [], {
+      runInstallerCommand([], {
         cwd: context.cwd,
         homeDir: context.home,
         bundlePath: context.bundle,
@@ -343,7 +339,7 @@ describe('agent-jobs installer', () => {
     const target = join(context.root, 'new', 'nested', 'project');
 
     await expect(
-      runInstallerCommand('init', [target, '--target', 'codex', '--yes'], {
+      runInstallerCommand([target, '--target', 'codex', '--yes'], {
         cwd: context.cwd,
         homeDir: context.home,
         bundlePath: context.bundle,
@@ -357,7 +353,7 @@ describe('agent-jobs installer', () => {
     await expect(exists(join(target, '.claude'))).resolves.toBe(false);
   });
 
-  it('keeps a newly created target canonical across init and uninstall', async () => {
+  it('keeps a newly created target canonical', async () => {
     const context = await fixture();
     const canonicalParent = join(context.cwd, 'canonical-parent');
     const linkedParent = join(context.cwd, 'linked-parent');
@@ -372,27 +368,13 @@ describe('agent-jobs installer', () => {
       stderr: capture().stream,
       isTTY: false,
     };
-    const initOutput = capture();
+    const stdout = capture();
 
-    await runInstallerCommand('init', [target, '--target', 'codex', '--yes', '--json'], {
+    await runInstallerCommand([target, '--target', 'codex', '--yes', '--json'], {
       ...environment,
-      stdout: initOutput.stream,
+      stdout: stdout.stream,
     });
-    expect(JSON.parse(initOutput.read())).toMatchObject({ path: canonicalTarget });
-
-    const uninstallOutput = capture();
-    await runInstallerCommand(
-      'uninstall',
-      [target, '--target', 'codex', '--yes', '--json'],
-      { ...environment, stdout: uninstallOutput.stream },
-    );
-    expect(JSON.parse(uninstallOutput.read())).toMatchObject({
-      path: canonicalTarget,
-      status: 'uninstalled',
-    });
-    await expect(exists(join(canonicalTarget, '.agent-jobs', 'install-manifest.json'))).resolves.toBe(
-      false,
-    );
+    expect(JSON.parse(stdout.read())).toMatchObject({ path: canonicalTarget });
   });
 
   it('makes doctor recognize a complete host install but not a skill alone', async () => {
@@ -416,7 +398,7 @@ describe('agent-jobs installer', () => {
       detail: { code: 'init_required' },
     });
 
-    await runInstallerCommand('init', ['--target', 'codex', '--yes'], {
+    await runInstallerCommand(['--target', 'codex', '--yes'], {
       cwd: context.cwd,
       homeDir: context.home,
       bundlePath: context.bundle,
@@ -439,7 +421,7 @@ describe('agent-jobs installer', () => {
     const target = join(context.root, 'dry-run-project');
 
     await expect(
-      runInstallerCommand('init', [target, '--dry-run', '--json'], {
+      runInstallerCommand([target, '--dry-run', '--json'], {
         cwd: context.cwd,
         homeDir: context.home,
         bundlePath: context.bundle,
@@ -456,7 +438,7 @@ describe('agent-jobs installer', () => {
     const context = await fixture();
 
     await expect(
-      runInstallerCommand('init', [], {
+      runInstallerCommand([], {
         cwd: context.cwd,
         homeDir: context.home,
         bundlePath: context.bundle,
@@ -467,7 +449,7 @@ describe('agent-jobs installer', () => {
     ).rejects.toMatchObject({ code: 'invalid_arguments' });
 
     await expect(
-      runInstallerCommand('init', ['somewhere', '--global', '--yes'], {
+      runInstallerCommand(['somewhere', '--global', '--yes'], {
         cwd: context.cwd,
         homeDir: context.home,
         bundlePath: context.bundle,
@@ -482,7 +464,6 @@ describe('agent-jobs installer', () => {
     const stdout = capture();
 
     await runInstallerCommand(
-      'init',
       ['--global', '--target', 'claude', '--yes', '--json'],
       {
         cwd: context.cwd,
@@ -522,12 +503,12 @@ describe('agent-jobs installer', () => {
       stderr: capture().stream,
       isTTY: false,
     };
-    await runInstallerCommand('init', ['--yes'], {
+    await runInstallerCommand(['--yes'], {
       ...environment,
       stdout: capture().stream,
     });
     const stdout = capture();
-    await runInstallerCommand('init', ['--yes', '--json'], {
+    await runInstallerCommand(['--yes', '--json'], {
       ...environment,
       stdout: stdout.stream,
     });
@@ -552,7 +533,7 @@ describe('agent-jobs installer', () => {
       'utf8',
     );
 
-    await runInstallerCommand('init', ['--target', 'codex', '--yes'], {
+    await runInstallerCommand(['--target', 'codex', '--yes'], {
       cwd: context.cwd,
       homeDir: context.home,
       bundlePath: context.bundle,
@@ -567,7 +548,7 @@ describe('agent-jobs installer', () => {
     expect(config).toContain('[mcp_servers.agent_jobs]');
   });
 
-  it('backs up forced managed changes and restores them during uninstall', async () => {
+  it('requires --force to replace managed changes', async () => {
     const context = await fixture();
     const environment = {
       cwd: context.cwd,
@@ -577,49 +558,19 @@ describe('agent-jobs installer', () => {
       stderr: capture().stream,
       isTTY: false,
     };
-    await runInstallerCommand('init', ['--target', 'codex', '--yes'], environment);
+    await runInstallerCommand(['--target', 'codex', '--yes'], environment);
     const worker = join(context.cwd, '.codex', 'agents', 'agent_job_worker.toml');
     const modified = '# Managed by agent-jobs\nlocal change\n';
     await writeFile(worker, modified, 'utf8');
 
     await expect(
-      runInstallerCommand('init', ['--target', 'codex', '--yes'], environment),
+      runInstallerCommand(['--target', 'codex', '--yes'], environment),
     ).rejects.toMatchObject({ code: 'target_conflict' });
     await runInstallerCommand(
-      'init',
       ['--target', 'codex', '--yes', '--force'],
       environment,
     );
     await expect(readFile(worker, 'utf8')).resolves.toContain('name = "agent_job_worker"');
-
-    await runInstallerCommand('uninstall', ['--target', 'codex', '--yes'], environment);
-    await expect(readFile(worker, 'utf8')).resolves.toBe(modified);
-  });
-
-  it('restores pre-existing merged files and reports missing installs', async () => {
-    const context = await fixture();
-    const original = '# Existing instructions\n';
-    await writeFile(join(context.cwd, 'AGENTS.md'), original, 'utf8');
-    const environment = {
-      cwd: context.cwd,
-      homeDir: context.home,
-      bundlePath: context.bundle,
-      stdout: capture().stream,
-      stderr: capture().stream,
-      isTTY: false,
-    };
-    await runInstallerCommand('init', ['--target', 'codex', '--yes'], environment);
-    await runInstallerCommand('uninstall', ['--target', 'codex', '--yes'], environment);
-
-    await expect(readFile(join(context.cwd, 'AGENTS.md'), 'utf8')).resolves.toBe(original);
-    await expect(exists(join(context.cwd, '.agents', 'skills', 'agent-jobs', 'SKILL.md'))).resolves.toBe(false);
-
-    const stdout = capture();
-    await runInstallerCommand('uninstall', ['--target', 'codex', '--yes', '--json'], {
-      ...environment,
-      stdout: stdout.stream,
-    });
-    expect(JSON.parse(stdout.read())).toMatchObject({ status: 'not_installed' });
   });
 
   it('rejects a target path that is a file', async () => {
@@ -628,7 +579,7 @@ describe('agent-jobs installer', () => {
     await writeFile(target, 'file', 'utf8');
 
     await expect(
-      runInstallerCommand('init', [target, '--yes'], {
+      runInstallerCommand([target, '--yes'], {
         cwd: context.cwd,
         homeDir: context.home,
         bundlePath: context.bundle,

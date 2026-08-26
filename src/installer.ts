@@ -1,5 +1,4 @@
 import type { Readable as NodeReadable, Writable as NodeWritable } from 'node:stream';
-import { createHash } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
 import {
   access,
@@ -9,7 +8,6 @@ import {
   realpath,
   rm,
   rmdir,
-  writeFile,
 } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
@@ -20,7 +18,6 @@ import { parseArgs } from 'node:util';
 import {
   AgentJobsError,
   atomicWriteText,
-  stringifyStrictJson,
 } from '@agent-jobs/runtime';
 import * as clack from '@clack/prompts';
 
@@ -43,9 +40,6 @@ import {
   routingBlock,
 } from './install-templates.js';
 
-declare const __AGENT_JOBS_PACKAGE_VERSION__: string;
-
-const PACKAGE_VERSION = __AGENT_JOBS_PACKAGE_VERSION__;
 const TARGETS = new Set<InstallTarget>(['all', 'codex', 'claude']);
 
 export type InstallTarget = 'all' | 'codex' | 'claude';
@@ -72,31 +66,12 @@ interface PlannedFile {
   kind: 'managed' | 'merged';
 }
 
-interface ManifestEntry {
-  path: string;
-  installed_sha256: string;
-  original_existed: boolean;
-  backup_path: string | null;
-}
-
-interface InstallManifest {
-  schema_version: 1;
-  package_version: string;
-  scope: Scope;
-  root: string;
-  targets: Array<'codex' | 'claude'>;
-  files: ManifestEntry[];
-}
-
 interface InstallPlan {
-  operation: 'init' | 'uninstall';
   root: string;
   scope: Scope;
   targets: Array<'codex' | 'claude'>;
   createRoot: boolean;
-  manifestPath: string;
   files: PlannedFile[];
-  manifest?: InstallManifest;
 }
 
 interface InstallLocations {
@@ -133,7 +108,7 @@ export interface InstallerEnvironment {
 
 export interface InstallerCommandResult extends Record<string, unknown> {
   ok: true;
-  status: 'initialized' | 'uninstalled' | 'cancelled' | 'not_installed';
+  status: 'initialized' | 'cancelled';
   path: string;
   scope: Scope;
   targets: string[];
@@ -165,7 +140,7 @@ function parseInstallArguments(args: readonly string[]): InstallArguments {
     invalidArguments(error instanceof Error ? error.message : String(error));
   }
   if (parsed.positionals.length > 1) {
-    invalidArguments('init and uninstall accept at most one path');
+    invalidArguments('init accepts at most one path');
   }
   const rawTarget = parsed.values.target;
   if (
@@ -190,10 +165,6 @@ function parseInstallArguments(args: readonly string[]): InstallArguments {
 
 function selectedTargets(target: InstallTarget): Array<'codex' | 'claude'> {
   return target === 'all' ? ['codex', 'claude'] : [target];
-}
-
-function hash(text: string): string {
-  return createHash('sha256').update(text).digest('hex');
 }
 
 async function fileText(path: string): Promise<string | null> {
@@ -346,7 +317,6 @@ async function resolveRoot(
   args: ResolvedInstallArguments,
   cwd: string,
   homeDir: string,
-  operation: 'init' | 'uninstall',
 ): Promise<{ root: string; scope: Scope; createRoot: boolean }> {
   if (args.global) {
     const root = resolve(homeDir);
@@ -365,9 +335,6 @@ async function resolveRoot(
   }
   if (kind === 'directory') {
     return { root: await realpath(candidate), scope: 'project', createRoot: false };
-  }
-  if (operation === 'uninstall') {
-    return { root: candidate, scope: 'project', createRoot: false };
   }
   let ancestor = dirname(candidate);
   while ((await pathInfo(ancestor)) === 'missing') ancestor = dirname(ancestor);
@@ -553,77 +520,9 @@ async function buildFiles(
   return files;
 }
 
-function manifestPath(root: string): string {
-  return join(root, '.agent-jobs', 'install-manifest.json');
-}
-
-function targetInstallPaths(
-  root: string,
-  scope: Scope,
-  target: 'codex' | 'claude',
-): Set<string> {
-  const paths = new Set<string>();
-  const locations = installLocations(root, scope, target);
-  paths.add(join(locations.skillDir, 'SKILL.md'));
-  paths.add(join(locations.skillDir, 'scripts', 'agent-jobs.mjs'));
-  paths.add(locations.instruction);
-  paths.add(locations.config);
-  if (target === 'codex') {
-    paths.add(join(locations.skillDir, 'agents', 'openai.yaml'));
-    paths.add(join(locations.agentDir, 'agent_job_worker.toml'));
-    paths.add(join(locations.agentDir, 'agent_job_postprocessor.toml'));
-  } else {
-    paths.add(join(locations.agentDir, 'agent_job_worker.md'));
-    paths.add(join(locations.agentDir, 'agent_job_postprocessor.md'));
-    paths.add(locations.settings!);
-  }
-  return paths;
-}
-
-function allowedInstallPaths(root: string, scope: Scope): Set<string> {
-  return new Set([
-    ...targetInstallPaths(root, scope, 'codex'),
-    ...targetInstallPaths(root, scope, 'claude'),
-  ]);
-}
-
 function isWithin(path: string, root: string): boolean {
   const child = relative(root, path);
   return child === '' || (child !== '..' && !child.startsWith(`..${sep}`));
-}
-
-async function readManifest(
-  path: string,
-  root: string,
-  scope: Scope,
-): Promise<InstallManifest | undefined> {
-  const text = await fileText(path);
-  if (text === null)
-    return undefined;
-  try {
-    const manifest = JSON.parse(text) as InstallManifest;
-    if (manifest.schema_version !== 1 || !Array.isArray(manifest.files))
-      throw new Error('Invalid manifest schema');
-    if (manifest.root !== root || manifest.scope !== scope)
-      throw new Error('Manifest target mismatch');
-    const allowed = allowedInstallPaths(root, scope);
-    const backupRoot = join(dirname(path), 'backups');
-    for (const entry of manifest.files) {
-      if (
-        typeof entry.path !== 'string'
-        || !allowed.has(entry.path)
-        || !/^[a-f0-9]{64}$/.test(entry.installed_sha256)
-        || typeof entry.original_existed !== 'boolean'
-        || (entry.backup_path !== null
-          && (typeof entry.backup_path !== 'string' || !isWithin(entry.backup_path, backupRoot)))
-      ) {
-        throw new Error('Invalid manifest entry');
-      }
-    }
-    return manifest;
-  } catch {
-    throw new AgentJobsError('invalid_manifest', `Invalid install manifest: ${path}`);
-  }
 }
 
 async function assertWritableTargets(files: PlannedFile[]): Promise<void> {
@@ -673,19 +572,14 @@ async function pruneEmptyParents(start: string, stop: string): Promise<void> {
 
 async function preflightFiles(
   files: PlannedFile[],
-  manifest: InstallManifest | undefined,
   force: boolean,
 ): Promise<void> {
-  const prior = new Map(manifest?.files.map(entry => [entry.path, entry]) ?? []);
   for (const file of files) {
     const current = await fileText(file.path);
     if (current === null || current === file.content)
       continue;
-    const entry = prior.get(file.path);
     if (file.kind === 'merged') {
-      const isUnmodifiedInstall
-        = entry !== undefined && hash(current) === entry.installed_sha256;
-      if (isUnmodifiedInstall || !isAgentJobsManaged(current))
+      if (!isAgentJobsManaged(current))
         continue;
       if (!force) {
         throw new AgentJobsError(
@@ -693,14 +587,13 @@ async function preflightFiles(
           `Managed configuration block has local changes: ${file.path}`,
           {
             path: file.path,
-            hint: 'Re-run with --force to back up and replace the managed block.',
+            hint: 'Re-run with --force to replace the managed block.',
           },
         );
       }
       continue;
     }
-    const recognized = entry !== undefined || isAgentJobsManaged(current);
-    if (!recognized) {
+    if (!isAgentJobsManaged(current)) {
       throw new AgentJobsError(
         'target_conflict',
         `Refusing to overwrite unmanaged file: ${file.path}`,
@@ -710,89 +603,28 @@ async function preflightFiles(
     if (!force) {
       throw new AgentJobsError('target_conflict', `Managed file has local changes: ${file.path}`, {
         path: file.path,
-        hint: 'Re-run with --force to back up and replace the managed file.',
+        hint: 'Re-run with --force to replace the managed file.',
       });
     }
   }
-}
-
-async function backupFile(
-  source: string,
-  backupRoot: string,
-  root: string,
-): Promise<string> {
-  const relativePath = relative(root, source).replaceAll('..', '__parent__');
-  const destination = join(backupRoot, relativePath);
-  await mkdir(dirname(destination), { recursive: true });
-  await writeFile(destination, await readFile(source));
-  return destination;
 }
 
 async function applyInit(plan: InstallPlan): Promise<{ changed: string[]; warnings: string[] }> {
   const changed: string[] = [];
   const warnings: string[] = [];
   const createdRoot = plan.createRoot;
-  const previous = new Map(plan.manifest?.files.map(entry => [entry.path, entry]) ?? []);
-  const entries = new Map(previous);
-  const backupRoot = join(
-    dirname(plan.manifestPath),
-    'backups',
-    new Date().toISOString().replaceAll(':', '-'),
-  );
   const applied: Array<{ path: string; original: string | null }> = [];
   try {
     if (createdRoot)
       await mkdir(plan.root, { recursive: true });
     for (const file of plan.files) {
       const current = await fileText(file.path);
-      const previousEntry = previous.get(file.path);
-      if (current === file.content) {
-        if (previousEntry === undefined) {
-          const backupPath = await backupFile(file.path, backupRoot, plan.root);
-          entries.set(file.path, {
-            path: file.path,
-            installed_sha256: hash(file.content),
-            original_existed: true,
-            backup_path: backupPath,
-          });
-        }
+      if (current === file.content)
         continue;
-      }
-      let backupPath: string | null = null;
-      let originalExisted = current !== null;
-      if (
-        current !== null
-        && previousEntry !== undefined
-        && hash(current) === previousEntry.installed_sha256
-      ) {
-        backupPath = previousEntry.backup_path;
-        originalExisted = previousEntry.original_existed;
-      } else if (current !== null) {
-        backupPath = await backupFile(file.path, backupRoot, plan.root);
-      }
       applied.push({ path: file.path, original: current });
       await atomicWriteText(file.path, file.content);
-      entries.set(file.path, {
-        path: file.path,
-        installed_sha256: hash(file.content),
-        original_existed: originalExisted,
-        backup_path: backupPath,
-      });
       changed.push(file.path);
     }
-    const manifest: InstallManifest = {
-      schema_version: 1,
-      package_version: PACKAGE_VERSION,
-      scope: plan.scope,
-      root: plan.root,
-      targets: [...new Set([...(plan.manifest?.targets ?? []), ...plan.targets])],
-      files: [...entries.values()].sort((left, right) => left.path.localeCompare(right.path)),
-    };
-    const manifestText = stringifyStrictJson(manifest, {
-      pretty: true,
-      sortKeys: true,
-    });
-    await atomicWriteText(plan.manifestPath, `${manifestText}\n`);
     if (changed.length === 0)
       warnings.push('Installation is already up to date.');
     return { changed, warnings };
@@ -826,89 +658,14 @@ async function applyInit(plan: InstallPlan): Promise<{ changed: string[]; warnin
   }
 }
 
-async function applyUninstall(
-  plan: InstallPlan,
-): Promise<{ changed: string[]; warnings: string[] }> {
-  const changed: string[] = [];
-  const warnings: string[] = [];
-  if (!plan.manifest)
-    return { changed, warnings };
-  const selected = new Set(plan.targets);
-  const codexPaths = targetInstallPaths(plan.root, plan.scope, 'codex');
-  const claudePaths = targetInstallPaths(plan.root, plan.scope, 'claude');
-  const remaining: ManifestEntry[] = [];
-  for (const entry of plan.manifest.files) {
-    let target: 'codex' | 'claude' | null = null;
-    if (codexPaths.has(entry.path))
-      target = 'codex';
-    else if (claudePaths.has(entry.path))
-      target = 'claude';
-    if (target === null || !selected.has(target)) {
-      remaining.push(entry);
-      continue;
-    }
-    const current = await fileText(entry.path);
-    if (current === null)
-      continue;
-    if (hash(current) !== entry.installed_sha256) {
-      warnings.push(`Preserved locally modified file: ${entry.path}`);
-      remaining.push(entry);
-      continue;
-    }
-    if (entry.original_existed && entry.backup_path) {
-      const backup = await fileText(entry.backup_path);
-      if (backup === null) {
-        warnings.push(`Missing backup; preserved file: ${entry.path}`);
-        remaining.push(entry);
-        continue;
-      }
-      await atomicWriteText(entry.path, backup);
-    } else {
-      await rm(entry.path, { force: true });
-    }
-    if (entry.backup_path) {
-      await rm(entry.backup_path, { force: true });
-      await pruneEmptyParents(
-        dirname(entry.backup_path),
-        join(dirname(plan.manifestPath), 'backups'),
-      );
-    }
-    changed.push(entry.path);
-  }
-  if (remaining.length === 0) {
-    await rm(plan.manifestPath, { force: true });
-  } else {
-    const targets = plan.manifest.targets.filter(target => !selected.has(target));
-    const manifestText = stringifyStrictJson(
-      { ...plan.manifest, targets, files: remaining },
-      { pretty: true, sortKeys: true },
-    );
-    await atomicWriteText(plan.manifestPath, `${manifestText}\n`);
-  }
-  return { changed, warnings };
-}
-
 async function createPlan(
-  operation: 'init' | 'uninstall',
   args: ResolvedInstallArguments,
   environment: InstallerEnvironment,
 ): Promise<InstallPlan> {
   const cwd = resolve(environment.cwd ?? process.cwd());
   const homeDir = resolve(environment.homeDir ?? homedir());
-  const resolved = await resolveRoot(args, cwd, homeDir, operation);
+  const resolved = await resolveRoot(args, cwd, homeDir);
   const targets = selectedTargets(args.target);
-  const path = manifestPath(resolved.root);
-  const manifest = await readManifest(path, resolved.root, resolved.scope);
-  if (operation === 'uninstall') {
-    return {
-      operation,
-      ...resolved,
-      targets,
-      manifestPath: path,
-      files: [],
-      manifest,
-    };
-  }
   const bundlePath = await resolveBundlePath(environment.bundlePath);
   let bundleContent: string;
   try {
@@ -928,14 +685,11 @@ async function createPlan(
   }
   const files = await buildFiles(resolved.root, resolved.scope, targets, bundleContent);
   await assertWritableTargets(files);
-  await preflightFiles(files, manifest, args.force);
+  await preflightFiles(files, args.force);
   return {
-    operation,
     ...resolved,
     targets,
-    manifestPath: path,
     files,
-    manifest,
   };
 }
 
@@ -963,7 +717,6 @@ function promptIo(environment: InstallerEnvironment): {
 }
 
 async function interactiveArguments(
-  operation: 'init' | 'uninstall',
   parsed: InstallArguments,
   environment: InstallerEnvironment,
 ): Promise<ResolvedInstallArguments | undefined> {
@@ -974,16 +727,11 @@ async function interactiveArguments(
   let path = parsed.path;
   let global = parsed.global;
 
-  prompts.intro(
-    operation === 'init' ? 'Initialize Agent Jobs' : 'Uninstall Agent Jobs',
-    io,
-  );
+  prompts.intro('Initialize Agent Jobs', io);
 
   if (!global && path === undefined) {
     const location = await prompts.select<'current' | 'custom' | 'global'>({
-      message: operation === 'init'
-        ? 'Where should Agent Jobs be configured?'
-        : 'Where is Agent Jobs installed?',
+      message: 'Where should Agent Jobs be configured?',
       options: [
         { value: 'current', label: 'Current project', hint: cwd },
         { value: 'custom', label: 'Another project', hint: 'Enter a path' },
@@ -1021,9 +769,7 @@ async function interactiveArguments(
   let target = parsed.target;
   if (target === undefined) {
     const selected = await prompts.multiselect<'codex' | 'claude'>({
-      message: operation === 'init'
-        ? 'Which agent hosts should be configured?'
-        : 'Which agent hosts should be removed?',
+      message: 'Which agent hosts should be configured?',
       options: [
         { value: 'codex', label: 'Codex' },
         { value: 'claude', label: 'Claude' },
@@ -1051,17 +797,17 @@ function showPreview(
   args: ResolvedInstallArguments,
   environment: InstallerEnvironment,
 ): void {
-  const title = plan.operation === 'init' ? 'Initialization preview' : 'Uninstall preview';
-  (environment.prompts ?? clack).note(previewText(plan, args), title, promptIo(environment));
+  (environment.prompts ?? clack).note(
+    previewText(plan, args),
+    'Initialization preview',
+    promptIo(environment),
+  );
 }
 
-async function confirmPlan(
-  operation: 'init' | 'uninstall',
-  environment: InstallerEnvironment,
-): Promise<boolean | undefined> {
+async function confirmPlan(environment: InstallerEnvironment): Promise<boolean | undefined> {
   const prompts = environment.prompts ?? clack;
   const answer = await prompts.confirm({
-    message: operation === 'init' ? 'Initialize with these options?' : 'Uninstall these files?',
+    message: 'Initialize with these options?',
     initialValue: true,
     ...promptIo(environment),
   });
@@ -1073,23 +819,17 @@ async function confirmPlan(
 function humanResult(result: InstallerCommandResult): string {
   if (result.status === 'cancelled')
     return `Cancelled; no files were changed in ${result.path}.\n`;
-  if (result.status === 'not_installed')
-    return `agent-jobs is not installed in ${result.path}.\n`;
-  const verb = result.status === 'initialized' ? 'Initialized' : 'Uninstalled';
-  return `${verb} agent-jobs in ${result.path}; ${result.changed_files.length} file(s) changed.\n`;
+  return `Initialized agent-jobs in ${result.path}; ${result.changed_files.length} file(s) changed.\n`;
 }
 
 function interactiveResult(result: InstallerCommandResult): string {
   const lines = [humanResult(result).trim()];
   lines.push(...result.warnings.map(warning => `Warning: ${warning}`));
-  if (result.status === 'initialized') {
-    lines.push('Restart Codex and/or Claude to load the new skill, agents, and MCP server.');
-  }
+  lines.push('Restart Codex and/or Claude to load the new skill, agents, and MCP server.');
   return lines.join('\n');
 }
 
 export async function runInstallerCommand(
-  operation: 'init' | 'uninstall',
   argv: readonly string[],
   environment: InstallerEnvironment = {},
 ): Promise<number> {
@@ -1099,11 +839,11 @@ export async function runInstallerCommand(
   const tty = environment.isTTY ?? environment.stdin?.isTTY ?? process.stdin.isTTY === true;
   const interactive = tty && !parsed.json;
   const args = interactive
-    ? await interactiveArguments(operation, parsed, { ...environment, stderr })
+    ? await interactiveArguments(parsed, { ...environment, stderr })
     : resolvedArguments(parsed);
   if (args === undefined)
     return 0;
-  const plan = await createPlan(operation, args, environment);
+  const plan = await createPlan(args, environment);
   const base = {
     ok: true as const,
     path: plan.root,
@@ -1111,25 +851,12 @@ export async function runInstallerCommand(
     targets: plan.targets,
     create: plan.createRoot,
   };
-  if (operation === 'uninstall' && !plan.manifest) {
-    const result: InstallerCommandResult = {
-      ...base,
-      status: 'not_installed',
-      changed_files: [],
-      warnings: [],
-    };
-    if (args.json || !interactive)
-      stdout.write(args.json ? `${JSON.stringify(result)}\n` : humanResult(result));
-    else
-      (environment.prompts ?? clack).outro(humanResult(result).trim(), promptIo(environment));
-    return 0;
-  }
   if (!args.yes && !interactive) {
-    invalidArguments('Non-interactive init/uninstall requires --yes');
+    invalidArguments('Non-interactive init requires --yes');
   }
   if (interactive)
     showPreview(plan, args, { ...environment, stderr });
-  const confirmation = args.yes ? true : await confirmPlan(operation, { ...environment, stderr });
+  const confirmation = args.yes ? true : await confirmPlan({ ...environment, stderr });
   if (confirmation !== true) {
     const result: InstallerCommandResult = {
       ...base,
@@ -1140,10 +867,10 @@ export async function runInstallerCommand(
     (environment.prompts ?? clack).cancel(humanResult(result).trim(), promptIo(environment));
     return 0;
   }
-  const applied = operation === 'init' ? await applyInit(plan) : await applyUninstall(plan);
+  const applied = await applyInit(plan);
   const result: InstallerCommandResult = {
     ...base,
-    status: operation === 'init' ? 'initialized' : 'uninstalled',
+    status: 'initialized',
     changed_files: applied.changed,
     warnings: applied.warnings,
   };
@@ -1154,7 +881,7 @@ export async function runInstallerCommand(
   if (!interactive) {
     for (const warning of applied.warnings) stderr.write(`Warning: ${warning}\n`);
   }
-  if (operation === 'init' && !interactive) {
+  if (!interactive) {
     stderr.write(
       'Restart Codex and/or Claude to load the new skill, agents, and MCP server.\n',
     );
