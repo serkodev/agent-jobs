@@ -9,6 +9,7 @@ import type {
   ValidationDiagnostic,
 } from './schema.js';
 import type { TaskSpec } from './spec.js';
+import { Buffer } from 'node:buffer';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { lstat, mkdir, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -49,8 +50,10 @@ import {
 export const STATE_VERSION = 1;
 const STATE_DIRECTORY = '.agent-jobs';
 const DATABASE_FILENAME = 'state.sqlite';
+const HANDLE_DIRECTORY = 'handles';
 const HANDLE_PREFIX = 'aj_';
-const HANDLE_PATTERN = /^aj_[\w-]{32,}$/;
+const HANDLE_PATTERN = /^aj_([\w-]{43})_([\w-]+)$/;
+const HANDLE_VALUE_PATTERN = /^aj_[\w-]{32,}$/;
 const JOB_ID_PATTERN = /^[0-9a-f]{32}$/;
 const ACTIVE_STATUSES = new Set<RecordStatus>(['leased', 'running']);
 const TERMINAL_STATUSES = new Set<RecordStatus>([
@@ -85,8 +88,8 @@ type JobRecordRow = typeof jobRecords.$inferSelect;
 type ResultRow = typeof results.$inferSelect;
 
 export interface AgentJobsRuntimeOptions {
-  registryDir?: PathInput;
   projectRoot?: PathInput;
+  registryDir?: PathInput;
 }
 
 export interface PrepareOptions {
@@ -159,6 +162,11 @@ interface RegistryEntry {
   handle: string;
 }
 
+interface HandleLocator {
+  nonce: string;
+  registryDir: string;
+}
+
 const serializedSpecSchema: GenericSchema<unknown, SerializedSpec> = v.pipe(
   v.strictObject({
     name: nonBlankStringSchema,
@@ -193,7 +201,7 @@ const registryEntrySchema: GenericSchema<unknown, RegistryEntry> = v.strictObjec
   database_path: nonBlankStringSchema,
   job_id: v.pipe(v.string(), v.regex(JOB_ID_PATTERN)),
   record_index: v.pipe(v.number(), v.integer(), v.minValue(0)),
-  handle: v.pipe(v.string(), v.regex(HANDLE_PATTERN)),
+  handle: v.pipe(v.string(), v.regex(HANDLE_VALUE_PATTERN)),
 });
 
 interface SupersededSession {
@@ -241,8 +249,8 @@ interface OpenJobDatabase {
 
 /** SQLite is the authority for queue, lease, retry, and result state. */
 export class AgentJobsRuntime {
-  public readonly registryDir: string;
   public readonly projectRoot: string;
+  public readonly registryDir: string | null;
 
   public constructor(options: AgentJobsRuntimeOptions | PathInput = {}) {
     const structured
@@ -257,11 +265,10 @@ export class AgentJobsRuntime {
       = typeof options === 'string' || options instanceof URL
         ? options
         : options.registryDir;
-    this.registryDir = absolutePath(
-      explicit
-      ?? process.env.AGENT_JOBS_REGISTRY_DIR
-      ?? join(this.projectRoot, '.agent-jobs', 'handles'),
-    );
+    const configuredRegistry = explicit ?? process.env.AGENT_JOBS_REGISTRY_DIR;
+    this.registryDir = configuredRegistry === undefined
+      ? null
+      : absolutePath(configuredRegistry);
   }
 
   /** Validate every row before creating any durable job or lease. */
@@ -546,7 +553,7 @@ export class AgentJobsRuntime {
               .limit(leaseLimit);
         const assignments: JsonObject[] = [];
         for (const record of pending) {
-          const handle = await this.newHandle();
+          const handle = await this.newHandle(opened.databasePath);
           const registry: RegistryEntry = {
             state_version: STATE_VERSION,
             database_path: opened.databasePath,
@@ -1022,23 +1029,6 @@ export class AgentJobsRuntime {
       },
     });
 
-    try {
-      await mkdir(this.registryDir, { recursive: true });
-      const probe = join(
-        this.registryDir,
-        `.doctor-${randomUUID().replaceAll('-', '')}`,
-      );
-      await atomicWriteText(probe, 'ok\n', { noClobber: true });
-      await safeUnlink(probe);
-      checks.push({ name: 'handle_registry', ok: true, detail: this.registryDir });
-    } catch (error) {
-      checks.push({
-        name: 'handle_registry',
-        ok: false,
-        detail: errorMessage(error),
-      });
-    }
-
     if (options.taskSpec !== undefined && options.taskSpec !== null) {
       try {
         const parsed = await loadSpec(options.taskSpec);
@@ -1051,14 +1041,19 @@ export class AgentJobsRuntime {
         });
       }
     }
+    let registryDir = this.registryDir;
     if (options.outputDir !== undefined && options.outputDir !== null) {
       let opened: OpenJobDatabase | undefined;
       try {
         opened = await this.openJobDatabase(options.outputDir, null);
+        registryDir ??= registryDirectoryFor(opened.databasePath);
         checks.push({
           name: 'output_dir',
           ok: true,
-          detail: { database: opened.databasePath, job_id: opened.jobId },
+          detail: {
+            database: opened.databasePath,
+            job_id: opened.jobId,
+          },
         });
       } catch (error) {
         checks.push({
@@ -1070,13 +1065,25 @@ export class AgentJobsRuntime {
         opened?.close();
       }
     }
+    if (registryDir !== null) {
+      try {
+        await probeHandleRegistry(registryDir);
+        checks.push({ name: 'handle_registry', ok: true, detail: registryDir });
+      } catch (error) {
+        checks.push({
+          name: 'handle_registry',
+          ok: false,
+          detail: errorMessage(error),
+        });
+      }
+    }
 
     return {
       ok: checks.every(check => check.ok === true),
       node: nodeVersion,
       node_executable: process.execPath,
       project_root: this.projectRoot,
-      registry_dir: this.registryDir,
+      registry_dir: registryDir,
       checks,
     };
   }
@@ -1289,24 +1296,41 @@ export class AgentJobsRuntime {
     return { client, close, databasePath, registry };
   }
 
-  private async newHandle(): Promise<string> {
-    await mkdir(this.registryDir, { recursive: true });
+  private async newHandle(databasePath: string): Promise<string> {
+    const registryDir = registryDirectoryFor(databasePath, this.registryDir);
+    await ensureRealDirectory(registryDir, true, false);
     for (;;) {
-      const handle = `${HANDLE_PREFIX}${randomBytes(32).toString('base64url')}`;
+      const nonce = randomBytes(32).toString('base64url');
+      const encodedPath = Buffer.from(registryDir).toString('base64url');
+      const handle = `${HANDLE_PREFIX}${nonce}_${encodedPath}`;
       if (!(await pathExists(this.registryPath(handle))))
         return handle;
     }
   }
 
   private registryPath(handle: string): string {
-    if (typeof handle !== 'string' || !HANDLE_PATTERN.test(handle)) {
-      throw new AgentJobsError('invalid_handle', 'Assignment handle is invalid');
+    const locator = parseHandleLocator(handle);
+    if (locator !== null) {
+      return join(
+        locator.registryDir,
+        `${HANDLE_PREFIX}${locator.nonce}.json`,
+      );
     }
-    return join(this.registryDir, `${handle}.json`);
+    const legacyRegistry = this.registryDir
+      ?? join(this.projectRoot, STATE_DIRECTORY, HANDLE_DIRECTORY);
+    return join(legacyRegistry, `${handle}.json`);
   }
 
   private async readRegistry(handle: string): Promise<RegistryEntry> {
     const path = this.registryPath(handle);
+    const registryDir = dirname(path);
+    if (!(await pathExists(registryDir))) {
+      throw new AgentJobsError(
+        'invalid_handle',
+        'Assignment handle is unknown or expired',
+      );
+    }
+    await ensureRealDirectory(registryDir, false, false);
     if (!(await pathExists(path))) {
       throw new AgentJobsError(
         'invalid_handle',
@@ -1722,6 +1746,40 @@ function listsObjectKeys(
 
 async function registryDatabasePath(registry: RegistryEntry): Promise<string> {
   const path = registry.database_path;
+  const destination = handleDatabaseDestination(path);
+  await ensureOutputLayout(destination, false);
+  await ensureDatabaseStorage(path, false);
+  return path;
+}
+
+function parseHandleLocator(handle: string): HandleLocator | null {
+  if (typeof handle !== 'string')
+    throw invalidHandle();
+  const match = HANDLE_PATTERN.exec(handle);
+  if (match === null) {
+    if (HANDLE_VALUE_PATTERN.test(handle))
+      return null;
+    throw invalidHandle();
+  }
+  const [, nonce, encodedPath] = match;
+  if (nonce === undefined || encodedPath === undefined)
+    throw invalidHandle();
+  const bytes = Buffer.from(encodedPath, 'base64url');
+  if (bytes.toString('base64url') !== encodedPath)
+    throw invalidHandle();
+  const registryDir = bytes.toString('utf8');
+  if (Buffer.from(registryDir).toString('base64url') !== encodedPath)
+    throw invalidHandle();
+  if (!isAbsolute(registryDir) || resolve(registryDir) !== registryDir)
+    throw invalidHandle();
+  return { nonce, registryDir };
+}
+
+function invalidHandle(): AgentJobsError {
+  return new AgentJobsError('invalid_handle', 'Assignment handle is invalid');
+}
+
+function handleDatabaseDestination(path: string): string {
   if (
     !isAbsolute(path)
     || basename(path) !== DATABASE_FILENAME
@@ -1733,9 +1791,26 @@ async function registryDatabasePath(registry: RegistryEntry): Promise<string> {
   if (path !== databasePathFor(destination)) {
     throw new AgentJobsError('invalid_handle', 'Handle database path is invalid');
   }
-  await ensureOutputLayout(destination, false);
-  await ensureDatabaseStorage(path, false);
-  return path;
+  return destination;
+}
+
+function registryDirectoryFor(
+  databasePath: string,
+  configuredRegistry: string | null = null,
+): string {
+  handleDatabaseDestination(databasePath);
+  return configuredRegistry
+    ?? join(dirname(databasePath), HANDLE_DIRECTORY);
+}
+
+async function probeHandleRegistry(registryDir: string): Promise<void> {
+  await ensureRealDirectory(registryDir, true, false);
+  const probe = join(
+    registryDir,
+    `.doctor-${randomUUID().replaceAll('-', '')}`,
+  );
+  await atomicWriteText(probe, 'ok\n', { noClobber: true });
+  await safeUnlink(probe);
 }
 
 function databasePathFor(destination: string): string {

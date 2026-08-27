@@ -267,15 +267,16 @@ CLAUDE.md
 .mcp.json
 ```
 
-The installer does not write an installation manifest. During execution,
-`.agent-jobs/handles/` stores temporary local assignment capabilities; it is not
-part of the job output.
+The installer does not write an installation manifest. During execution, each
+`OUTPUT_DIR/.agent-jobs/handles/` stores temporary local assignment capabilities;
+they are runtime state rather than collected job output.
 
 Each run stores durable state under the selected `OUTPUT_DIR`:
 
 ```text
 proposal-results/
   .agent-jobs/state.sqlite  # Authoritative jobs, rows, leases, and results
+  .agent-jobs/handles/      # Temporary assignment capabilities
   report.json              # Exported final validation report
   collected.json           # Optional combined output
 ```

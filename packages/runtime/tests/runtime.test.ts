@@ -131,8 +131,15 @@ async function fixture(options: {
     inputPath,
     specPath,
     outputDir,
-    runtime: new AgentJobsRuntime({ registryDir: join(root, 'registry') }),
+    runtime: new AgentJobsRuntime({ projectRoot: root }),
   };
+}
+
+function registryPath(outputDir: string, handle: string): string {
+  const nonce = /^aj_([\w-]{43})_/.exec(handle)?.[1];
+  if (nonce === undefined)
+    throw new Error(`Invalid test assignment handle: ${handle}`);
+  return join(outputDir, '.agent-jobs', 'handles', `aj_${nonce}.json`);
 }
 
 async function prepare(
@@ -214,7 +221,7 @@ describe('agentJobsRuntime', () => {
     await expect(readdir(context.outputDir)).rejects.toMatchObject({
       code: 'ENOENT',
     });
-    await expect(readdir(join(context.root, 'registry'))).rejects.toMatchObject({
+    await expect(readdir(join(context.root, '.agent-jobs'))).rejects.toMatchObject({
       code: 'ENOENT',
     });
   });
@@ -294,14 +301,10 @@ describe('agentJobsRuntime', () => {
     const handleContext = await fixture();
     const handleJob = await prepare(handleContext);
     const [lease] = await nextLeases(handleContext, handleJob.job_id);
-    const registryPath = join(
-      handleContext.root,
-      'registry',
-      `${lease!.handle}.json`,
-    );
-    const registry = await readStrict(registryPath) as Record<string, unknown>;
+    const path = registryPath(handleContext.outputDir, lease!.handle);
+    const registry = await readStrict(path) as Record<string, unknown>;
     registry.retired = true;
-    await writeFile(registryPath, stringifyStrictJson(registry), 'utf8');
+    await writeFile(path, stringifyStrictJson(registry), 'utf8');
     await expect(
       handleContext.runtime.getAssignment(lease!.handle),
     ).rejects.toMatchObject({ code: 'invalid_handle' });
@@ -415,6 +418,74 @@ describe('agentJobsRuntime', () => {
     await expect(
       context.runtime.getAssignment(lease!.handle),
     ).rejects.toMatchObject({ code: 'handle_consumed' });
+  });
+
+  it('keeps handles inside the output and resolves them from another runtime', async () => {
+    const context = await fixture();
+    const prepared = await prepare(context);
+    const [lease] = await nextLeases(context, prepared.job_id);
+
+    await expect(readdir(join(context.root, '.agent-jobs'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    await expect(
+      readdir(join(context.outputDir, '.agent-jobs', 'handles')),
+    ).resolves.toEqual([`aj_${/^aj_([\w-]{43})_/.exec(lease!.handle)![1]}.json`]);
+
+    const workerRuntime = new AgentJobsRuntime({
+      projectRoot: join(context.root, 'independent-worker'),
+    });
+    await expect(workerRuntime.getAssignment(lease!.handle)).resolves.toMatchObject({
+      id: 'one',
+      input: { id: 'one', title: 'One' },
+    });
+  });
+
+  it('keeps an explicitly configured external handle registry working', async () => {
+    const base = await fixture();
+    const customRegistry = join(base.root, 'custom-registry');
+    const context = {
+      ...base,
+      runtime: new AgentJobsRuntime({
+        projectRoot: base.root,
+        registryDir: customRegistry,
+      }),
+    };
+    const prepared = await prepare(context);
+    const [lease] = await nextLeases(context, prepared.job_id);
+    const nonce = /^aj_([\w-]{43})_/.exec(lease!.handle)![1];
+
+    await expect(readdir(customRegistry)).resolves.toEqual([`aj_${nonce}.json`]);
+    await expect(
+      new AgentJobsRuntime().getAssignment(lease!.handle),
+    ).resolves.toMatchObject({ id: 'one' });
+  });
+
+  it('can finish an active handle created by the previous registry layout', async () => {
+    const context = await fixture();
+    const prepared = await prepare(context);
+    const [lease] = await nextLeases(context, prepared.job_id);
+    const legacyHandle = `aj_${'x'.repeat(43)}`;
+    const legacyRegistry = join(
+      context.root,
+      '.agent-jobs',
+      'handles',
+      `${legacyHandle}.json`,
+    );
+    await mkdir(join(context.root, '.agent-jobs', 'handles'), { recursive: true });
+    await rename(registryPath(context.outputDir, lease!.handle), legacyRegistry);
+    const registry = await readStrict(legacyRegistry) as Record<string, unknown>;
+    registry.handle = legacyHandle;
+    await writeFile(legacyRegistry, stringifyStrictJson(registry), 'utf8');
+    await sqliteRows(
+      prepared.database,
+      'UPDATE job_records SET lease_token = ? WHERE job_id = ? AND record_id = ?',
+      [legacyHandle, prepared.job_id, lease!.id],
+    );
+
+    await expect(context.runtime.getAssignment(legacyHandle)).resolves.toMatchObject({
+      id: 'one',
+    });
   });
 
   it('passes through and hashes every input field when input is omitted', async () => {
@@ -732,7 +803,7 @@ describe('agentJobsRuntime', () => {
     );
     expect(status.counts).toMatchObject({ completed: 1, active: 0 });
     await expect(
-      readFile(join(context.root, 'registry', `${lease!.handle}.json`)),
+      readFile(registryPath(context.outputDir, lease!.handle)),
     ).rejects.toMatchObject({ code: 'ENOENT' });
     await expect(
       sqliteRows(
@@ -988,7 +1059,7 @@ describe('agentJobsRuntime', () => {
     ).rejects.toMatchObject({ code: 'invalid_handle' });
     for (const lease of [running, leased]) {
       await expect(
-        readFile(join(context.root, 'registry', `${lease!.handle}.json`)),
+        readFile(registryPath(context.outputDir, lease!.handle)),
       ).rejects.toMatchObject({ code: 'ENOENT' });
     }
     expect(await nextLeases(context, resumed.job_id, 10)).toMatchObject([
@@ -1204,15 +1275,11 @@ describe('agentJobsRuntime', () => {
       registryContext,
       prepared.job_id,
     );
-    const registryPath = join(
-      registryContext.root,
-      'registry',
-      `${lease!.handle}.json`,
-    );
+    const path = registryPath(registryContext.outputDir, lease!.handle);
     const outsideRegistry = join(registryContext.root, 'outside-registry.json');
-    await writeFile(outsideRegistry, await readFile(registryPath));
-    await unlink(registryPath);
-    await symlink(outsideRegistry, registryPath);
+    await writeFile(outsideRegistry, await readFile(path));
+    await unlink(path);
+    await symlink(outsideRegistry, path);
     await expect(
       registryContext.runtime.getAssignment(lease!.handle),
     ).rejects.toMatchObject({
