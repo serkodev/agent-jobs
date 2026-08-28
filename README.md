@@ -108,14 +108,11 @@ only instruction sent to each row worker.
 ```markdown
 ---
 name: review-proposal
-version: 1
 input:
-  loose: false
   schema:
-    id: string
+    id: [string, number]
     title: string
 output:
-  loose: false
   schema:
     decision:
       type: string
